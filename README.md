@@ -83,10 +83,20 @@ Executing a plan and proving it preserves behaviour stay with the caller. Plans
 whose ranges overlap are reduced to a non-conflicting set by weighted interval
 selection.
 
-Savings are computed from the same weights the scorer uses. They are close, not
-exact: `guard_inversion` models the depth term precisely and ignores breadth,
-which measured 67 against a scorer charge of 63 on `path/filepath/symlink.go`.
-An exact figure requires applying the rewrite to the graph and rescoring.
+Savings are **measured, not estimated**. Each plan is applied to the graph and
+the result is rescored, so `exact_saving` is what the scorer stops charging once
+the corresponding source edit is made, and `verified` says the rewrite scored
+cleanly. `saving` keeps the closed-form estimate for comparison.
+
+The difference is not cosmetic. Estimating from weights was wrong on every
+class and in both directions: `guard_inversion` came out 67 against a real 63,
+because dropping an else makes the branch one-armed and the frontend synthesises
+a replacement case; `excess_arity` came out 4 against a real 6, because a
+surplus parameter costs both the arity weight and the excess weight. Rewriting
+and rescoring needs no such reasoning to be right.
+
+`path/filepath/symlink.go:41` predicts 63. Making the edit by hand and rescoring
+the file charges 63.
 
 ## What Gets Scored
 

@@ -21,11 +21,22 @@ type Plan struct {
 	StartLine int       `json:"start_line"`
 	EndLine   int       `json:"end_line"`
 	Saving    int       `json:"saving"`
+	Exact     int       `json:"exact_saving"`
+	Verified  bool      `json:"verified"`
 	Detail    string    `json:"detail"`
 	NodeID    string    `json:"node_id"`
 	Anchor    string    `json:"anchor"`
 	Blockers  []string  `json:"blockers,omitempty"`
 	Source    sx.Source `json:"source"`
+}
+
+// Best is the measured saving when the rewrite could be scored, and the
+// estimate otherwise.
+func (p Plan) Best() int {
+	if p.Verified {
+		return p.Exact
+	}
+	return p.Saving
 }
 
 // Report is the analyzer's output, ordered by what it is worth.
@@ -90,13 +101,32 @@ func Analyze(g *sx.Graph) (Report, error) {
 		return plans[i].StartLine < plans[j].StartLine
 	})
 
+	// Score each rewrite instead of trusting the weight arithmetic. The
+	// estimate models the depth term; only the scorer knows the whole charge.
+	for i := range plans {
+		if exact, err := ExactSaving(g, plans[i]); err == nil {
+			plans[i].Exact = exact
+			plans[i].Verified = true
+		}
+	}
+	sort.SliceStable(plans, func(i, j int) bool {
+		a, b := plans[i].Best(), plans[j].Best()
+		if a != b {
+			return a > b
+		}
+		if plans[i].Path != plans[j].Path {
+			return plans[i].Path < plans[j].Path
+		}
+		return plans[i].StartLine < plans[j].StartLine
+	})
+
 	report := Report{Plans: plans}
 	for _, p := range plans {
-		report.Total += p.Saving
+		report.Total += p.Best()
 	}
 	report.Selected = selectNonConflicting(plans)
 	for _, p := range report.Selected {
-		report.Selection += p.Saving
+		report.Selection += p.Best()
 	}
 	return report, nil
 }

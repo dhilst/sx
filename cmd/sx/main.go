@@ -303,7 +303,11 @@ func cmdAnalyze(args []string, stdout io.Writer) error {
 			fmt.Fprintf(stdout, "... %d more\n", len(report.Plans)-*limit)
 			break
 		}
-		fmt.Fprintf(stdout, "%-16s %-40s -%d\n    %s\n", p.Kind, fmt.Sprintf("%s:%d", p.Path, p.StartLine), p.Saving, p.Detail)
+		mark := "estimated"
+		if p.Verified {
+			mark = "measured"
+		}
+		fmt.Fprintf(stdout, "%-16s %-38s -%-5d %s\n    %s\n", p.Kind, fmt.Sprintf("%s:%d", p.Path, p.StartLine), p.Best(), mark, p.Detail)
 		for _, b := range p.Blockers {
 			fmt.Fprintf(stdout, "    blocked: %s\n", b)
 		}
