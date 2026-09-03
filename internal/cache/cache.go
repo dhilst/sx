@@ -50,32 +50,38 @@ func (c Cache) CompileGoFile(path, rootDir string) (*sx.Graph, bool, error) {
 	if err != nil {
 		return nil, false, err
 	}
+	// The cache is an optimisation, not a requirement. Scoring a tree the
+	// caller cannot write to - a read-only checkout, GOROOT, a mounted
+	// artefact - must still produce a score.
+	c.store(cachePath, g)
+	return g, false, nil
+}
+
+func (c Cache) store(cachePath string, g *sx.Graph) {
 	if err := os.MkdirAll(filepath.Dir(cachePath), 0o755); err != nil {
-		return nil, false, err
+		return
 	}
 	var buf bytes.Buffer
 	if err := sx.Encode(&buf, g); err != nil {
-		return nil, false, err
+		return
 	}
 	tmp, err := os.CreateTemp(filepath.Dir(cachePath), ".tmp-*.sx")
 	if err != nil {
-		return nil, false, err
+		return
 	}
 	tmpName := tmp.Name()
 	if _, err := tmp.Write(buf.Bytes()); err != nil {
 		tmp.Close()
 		os.Remove(tmpName)
-		return nil, false, err
+		return
 	}
 	if err := tmp.Close(); err != nil {
 		os.Remove(tmpName)
-		return nil, false, err
+		return
 	}
 	if err := os.Rename(tmpName, cachePath); err != nil {
 		os.Remove(tmpName)
-		return nil, false, err
 	}
-	return g, false, nil
 }
 
 func Key(sourceUnitID string, source []byte) string {

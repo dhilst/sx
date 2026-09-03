@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"os"
 	"os/exec"
@@ -13,6 +14,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"purgatrix/internal/analyze"
 	"purgatrix/internal/cache"
 	gofront "purgatrix/internal/frontend/golang"
 	"purgatrix/internal/sc"
@@ -41,6 +43,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdRepo(args[1:], stdout)
 	case "pr":
 		return cmdPR(args[1:], stdout)
+	case "analyze":
+		return cmdAnalyze(args[1:], stdout)
 	case "suggest":
 		return cmdSuggest(args[1:], stdout)
 	default:
@@ -50,7 +54,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: sx <compile|score|repo|pr|suggest> [args]")
+	fmt.Fprintln(w, "usage: sx <compile|score|repo|pr|analyze|suggest> [args]")
 }
 
 func cmdCompile(args []string, stdout io.Writer) error {
@@ -164,6 +168,12 @@ func compileRepoWithCache(dir, cacheDir string, ignore ignoreGlobs) (*sx.Graph, 
 			return nil
 		}
 		if strings.HasSuffix(p, ".go") && !strings.HasSuffix(p, "_test.go") && !ignore.match(rel) {
+			// Respect build constraints. A package with per-platform files
+			// declares the same functions in each of them; compiling all of
+			// them merges several definitions of one identity and fails.
+			if ok, err := buildContext.MatchFile(filepath.Dir(p), filepath.Base(p)); err != nil || !ok {
+				return nil
+			}
 			g, _, err := c.CompileGoFile(p, root)
 			if err != nil {
 				return err
@@ -177,6 +187,10 @@ func compileRepoWithCache(dir, cacheDir string, ignore ignoreGlobs) (*sx.Graph, 
 	}
 	return sx.Merge(graphs...)
 }
+
+// buildContext decides which files belong to the build for this platform.
+// Scores are therefore platform-specific, exactly as the compiled program is.
+var buildContext = build.Default
 
 // skipDir reports whether a directory holds something other than the program
 // being scored. It follows the go tool's own rules: directories beginning with
@@ -245,6 +259,55 @@ func writeScore(stdout io.Writer, g *sx.Graph, jsonOut bool) error {
 		return writeJSON(stdout, r)
 	}
 	fmt.Fprint(stdout, sc.FormatText(r))
+	return nil
+}
+
+// cmdAnalyze reports what the graph says can be simplified, and what sx
+// computes each opportunity is worth, without running a provider.
+func cmdAnalyze(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("analyze", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	ignoreCSV := fs.String("ignore", "", "comma-separated globs to leave out")
+	limit := fs.Int("n", 20, "how many plans to print")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ignore, err := parseIgnore(*ignoreCSV)
+	if err != nil {
+		return err
+	}
+	target := "."
+	if fs.NArg() > 0 {
+		target = fs.Arg(0)
+	}
+	var g *sx.Graph
+	if strings.HasSuffix(target, ".go") || strings.HasSuffix(target, ".sx") {
+		g, err = graphForPath(target)
+	} else {
+		g, err = compileRepo(target, ignore)
+	}
+	if err != nil {
+		return err
+	}
+	report, err := analyze.Analyze(g)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writeJSON(stdout, report)
+	}
+	fmt.Fprintf(stdout, "%d plans, %d SC if every one landed\n", len(report.Plans), report.Total)
+	fmt.Fprintf(stdout, "%d of them do not overlap and carry no blocker: %d SC\n\n", len(report.Selected), report.Selection)
+	for i, p := range report.Plans {
+		if i >= *limit {
+			fmt.Fprintf(stdout, "... %d more\n", len(report.Plans)-*limit)
+			break
+		}
+		fmt.Fprintf(stdout, "%-16s %-40s -%d\n    %s\n", p.Kind, fmt.Sprintf("%s:%d", p.Path, p.StartLine), p.Saving, p.Detail)
+		for _, b := range p.Blockers {
+			fmt.Fprintf(stdout, "    blocked: %s\n", b)
+		}
+	}
 	return nil
 }
 

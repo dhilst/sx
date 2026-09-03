@@ -68,11 +68,33 @@ scored       the candidate translated and scored, so its SC number is real
 in `internal/suggest.DefaultPrompt` and is the seed of the prompt optimizer
 below.
 
+## Analyze
+
+`sx analyze` reports what the graph says can be simplified, and what sx computes
+each opportunity is worth, with no provider involved:
+
+```bash
+sx analyze [-json] [-n 20] [--ignore "glob"] .
+```
+
+The graph carries no expression semantics, so an opportunity is a **plan**: what
+to change, where, what it is worth, and any precondition the graph could check.
+Executing a plan and proving it preserves behaviour stay with the caller. Plans
+whose ranges overlap are reduced to a non-conflicting set by weighted interval
+selection.
+
+Savings are computed from the same weights the scorer uses. They are close, not
+exact: `guard_inversion` models the depth term precisely and ignores breadth,
+which measured 67 against a scorer charge of 63 on `path/filepath/symlink.go`.
+An exact figure requires applying the rewrite to the graph and rescoring.
+
 ## What Gets Scored
 
 Repository scoring walks `.go` files, excluding `_test.go`, and skips what the
 go tool itself ignores: directories beginning with `.` or `_`, plus `vendor`
-and `testdata`. Fixtures and build artifacts are not the program, and charging
+and `testdata`. Build constraints are honoured, so a package with per-platform
+files scores the files that build for this platform; scores are therefore
+platform-specific, exactly as the compiled program is. Fixtures and build artifacts are not the program, and charging
 a repository for them makes its score meaningless.
 
 `--ignore` takes a comma-separated list of globs on top of that, accepted by

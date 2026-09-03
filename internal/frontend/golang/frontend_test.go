@@ -76,3 +76,92 @@ func TestCompileMergeAcceptsSameNamedPackagesInDifferentDirs(t *testing.T) {
 		t.Fatalf("merging two main packages failed: %v", err)
 	}
 }
+
+// The graph must not invent state that the program does not have, and must not
+// lose reads that it does. Both directions mislead analysis over the IR.
+func TestStateModellingHasNoPhantomsAndNoLostReads(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "idx.go")
+	src := `package idx
+
+func Build(keys []string) map[string]bool {
+	m := map[string]bool{}
+	for _, k := range keys {
+		m[k] = true
+	}
+	return m
+}
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := CompileFile(path, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	names := map[string]map[string]int{}
+	for _, n := range g.Nodes {
+		if !sx.IsStateNode(n.Kind) {
+			continue
+		}
+		name, _ := n.Attributes["name"].(string)
+		names[name] = map[string]int{}
+		for _, e := range g.Edges {
+			if e.To == n.ID {
+				names[name][e.Kind]++
+			}
+		}
+	}
+	for _, phantom := range []string{"string", "bool", "m[]", "m_"} {
+		if _, ok := names[phantom]; ok {
+			t.Errorf("graph invented a state node %q", phantom)
+		}
+	}
+	if m, ok := names["m"]; !ok {
+		t.Fatal("no state node for m")
+	} else if m["write"] == 0 || m["read"] == 0 {
+		t.Errorf("m should be both written and read, got %v", m)
+	}
+	if k, ok := names["k"]; !ok {
+		t.Fatal("no state node for k")
+	} else if k["read"] == 0 {
+		t.Errorf("k is used as a map index and must be read, got %v", k)
+	}
+}
+
+// A labelled statement is a jump target, not an opaque operation. Collapsing
+// it hides its whole body from both the score and any analysis of the graph.
+func TestLabelledStatementBodyIsCompiled(t *testing.T) {
+	dir := t.TempDir()
+	path := filepath.Join(dir, "lbl.go")
+	src := `package lbl
+
+func F(pattern string) bool {
+	found := false
+Scan:
+	for i := 0; i < len(pattern); i++ {
+		if pattern[i] == 'x' {
+			found = true
+			break Scan
+		}
+	}
+	return found
+}
+`
+	if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	g, err := CompileFile(path, dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	kinds := map[string]int{}
+	for _, n := range g.Nodes {
+		kinds[n.Kind]++
+	}
+	for _, want := range []string{"loop", "branch", "case", "jump"} {
+		if kinds[want] == 0 {
+			t.Errorf("no %s node inside the labelled loop: %v", want, kinds)
+		}
+	}
+}

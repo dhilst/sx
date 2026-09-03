@@ -17,7 +17,7 @@ import (
 const (
 	FrontendID             = "go"
 	FrontendVersion        = "go-v0"
-	TranslationSpecVersion = "go-translation-v1"
+	TranslationSpecVersion = "go-translation-v8"
 )
 
 func CompileFile(path, rootDir string) (*sx.Graph, error) {
@@ -255,13 +255,51 @@ func (b *builder) compileStmt(parent string, stmt ast.Stmt) {
 		}
 	case *ast.BlockStmt:
 		b.compileStmtList(parent, s.List)
+	case *ast.LabeledStmt:
+		// The label is a jump target, not work of its own. Falling through to
+		// the default case would collapse the whole labelled statement - loop,
+		// body and every read inside it - into one opaque operation node.
+		b.compileStmt(parent, s.Stmt)
+	case *ast.SelectStmt:
+		b.compileSelect(parent, s)
+	case *ast.SendStmt:
+		b.structWithReads("operation", parent, s, []ast.Expr{s.Chan, s.Value})
 	default:
 		b.addContained("operation", parent, b.source(stmt.Pos(), stmt.End()), nil)
 	}
 }
 
+// compileSelect models a select as a multi-way branch over its communication
+// clauses, mirroring how switch is modelled.
+func (b *builder) compileSelect(parent string, s *ast.SelectStmt) {
+	nid := b.addContained("multi_branch", parent, b.source(s.Pos(), s.End()), nil)
+	if s.Body == nil {
+		return
+	}
+	for _, clause := range s.Body.List {
+		cc, ok := clause.(*ast.CommClause)
+		if !ok {
+			continue
+		}
+		label := "comm"
+		if cc.Comm == nil {
+			label = "default"
+		}
+		caseID := b.addContained("case", nid, b.source(cc.Pos(), cc.End()), map[string]any{"label": label})
+		if cc.Comm != nil {
+			b.compileStmt(caseID, cc.Comm)
+		}
+		b.compileStmtList(caseID, cc.Body)
+	}
+}
+
 func (b *builder) compileIf(parent string, s *ast.IfStmt) {
 	nid := b.addContained("branch", parent, b.source(s.Pos(), s.End()), nil)
+	// if x := f(); cond - the init statement is real work and its reads are
+	// real reads. Dropping it loses both from the graph.
+	if s.Init != nil {
+		b.compileStmt(nid, s.Init)
+	}
 	for _, r := range b.readsFromExprs([]ast.Expr{s.Cond}) {
 		b.read(nid, r, b.source(s.Cond.Pos(), s.Cond.End()))
 	}
@@ -278,6 +316,12 @@ func (b *builder) compileIf(parent string, s *ast.IfStmt) {
 
 func (b *builder) compileFor(parent string, s *ast.ForStmt) {
 	nid := b.addContained("loop", parent, b.source(s.Pos(), s.End()), nil)
+	if s.Init != nil {
+		b.compileStmt(nid, s.Init)
+	}
+	if s.Post != nil {
+		b.compileStmt(nid, s.Post)
+	}
 	if s.Cond != nil {
 		for _, r := range b.readsFromExprs([]ast.Expr{s.Cond}) {
 			b.read(nid, r, b.source(s.Cond.Pos(), s.Cond.End()))
@@ -302,6 +346,9 @@ func (b *builder) compileRange(parent string, s *ast.RangeStmt) {
 
 func (b *builder) compileSwitch(parent string, s *ast.SwitchStmt) {
 	nid := b.addContained("multi_branch", parent, b.source(s.Pos(), s.End()), nil)
+	if s.Init != nil {
+		b.compileStmt(nid, s.Init)
+	}
 	if s.Tag != nil {
 		for _, r := range b.readsFromExprs([]ast.Expr{s.Tag}) {
 			b.read(nid, r, b.source(s.Tag.Pos(), s.Tag.End()))
@@ -322,6 +369,12 @@ func (b *builder) compileSwitch(parent string, s *ast.SwitchStmt) {
 
 func (b *builder) compileTypeSwitch(parent string, s *ast.TypeSwitchStmt) {
 	nid := b.addContained("multi_branch", parent, b.source(s.Pos(), s.End()), nil)
+	if s.Init != nil {
+		b.compileStmt(nid, s.Init)
+	}
+	if s.Assign != nil {
+		b.compileStmt(nid, s.Assign)
+	}
 	for _, stmt := range s.Body.List {
 		cc, ok := stmt.(*ast.CaseClause)
 		if !ok {
@@ -343,6 +396,11 @@ func (b *builder) compileAssign(parent string, s *ast.AssignStmt) {
 		b.read(nid, r, b.source(s.Pos(), s.End()))
 	}
 	for _, lhs := range s.Lhs {
+		// m[k] = v writes m and reads k. Without this the index is a value the
+		// graph never sees read, which reads back as dead state.
+		for _, r := range b.readsFromExprs(indexExprs(lhs)) {
+			b.read(nid, r, b.source(lhs.Pos(), lhs.End()))
+		}
 		name := stateName(lhs)
 		if name == "" || name == "_" {
 			continue
@@ -353,7 +411,11 @@ func (b *builder) compileAssign(parent string, s *ast.AssignStmt) {
 		} else {
 			sid = b.ensureState(name, b.source(lhs.Pos(), lhs.End()))
 		}
-		b.write(nid, sid, b.source(lhs.Pos(), lhs.End()))
+		if _, direct := lhs.(*ast.Ident); direct {
+			b.write(nid, sid, b.source(lhs.Pos(), lhs.End()))
+		} else {
+			b.writeThrough(nid, sid, b.source(lhs.Pos(), lhs.End()))
+		}
 		for _, r := range reads {
 			b.edge("data_dependency", r, sid, b.source(s.Pos(), s.End()), nil)
 		}
@@ -399,7 +461,13 @@ func (b *builder) structWithReads(kind, parent string, stmt ast.Stmt, exprs []as
 
 func (b *builder) compileCall(parent string, call *ast.CallExpr, kind string) string {
 	nid := b.addContained(kind, parent, b.source(call.Pos(), call.End()), nil)
-	for _, r := range b.readsFromExprs(call.Args) {
+	reads := call.Args
+	// x.method(args) reads x. Counting only the arguments loses the receiver,
+	// and a variable used solely as a receiver then looks written but unread.
+	if sel, ok := call.Fun.(*ast.SelectorExpr); ok {
+		reads = append([]ast.Expr{sel.X}, reads...)
+	}
+	for _, r := range b.readsFromExprs(reads) {
 		b.read(nid, r, b.source(call.Pos(), call.End()))
 	}
 	target, resolution := b.callTarget(call)
@@ -421,33 +489,86 @@ func (b *builder) callTarget(call *ast.CallExpr) (string, string) {
 func (b *builder) readsFromExprs(exprs []ast.Expr) []string {
 	seen := map[string]bool{}
 	var ids []string
-	for _, expr := range exprs {
-		ast.Inspect(expr, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case nil:
-				return true
-			case *ast.Ident:
-				if x.Name == "_" || isBuiltinOrKeyword(x.Name) {
-					return true
-				}
-				sid := b.ensureState(x.Name, b.source(x.Pos(), x.End()))
-				if !seen[sid] {
-					seen[sid] = true
-					ids = append(ids, sid)
-				}
+	var visit func(ast.Node)
+	visit = func(n ast.Node) {
+		switch x := n.(type) {
+		case nil:
+			return
+		case *ast.Ident:
+			if x.Name == "_" || isBuiltinOrKeyword(x.Name) {
+				return
 			}
-			return true
+			sid := b.ensureState(x.Name, b.source(x.Pos(), x.End()))
+			if !seen[sid] {
+				seen[sid] = true
+				ids = append(ids, sid)
+			}
+			return
+		case *ast.SelectorExpr:
+			// x.Sel names a field or a package member, not a value in scope.
+			// Visiting it mints a state node named after the field, which then
+			// collides with every other use of that field name in the root.
+			visit(x.X)
+			return
+		case *ast.CompositeLit:
+			// The type of map[string]bool{} is not a read of `string` or `bool`.
+			for _, elt := range x.Elts {
+				visit(elt)
+			}
+			return
+		case *ast.CallExpr:
+			// make([]T, n) and new(T) carry a type in argument position.
+			args := x.Args
+			if id, ok := x.Fun.(*ast.Ident); ok && (id.Name == "make" || id.Name == "new") && len(args) > 0 {
+				args = args[1:]
+			}
+			visit(x.Fun)
+			for _, a := range args {
+				visit(a)
+			}
+			return
+		case *ast.ArrayType, *ast.MapType, *ast.ChanType, *ast.StructType,
+			*ast.InterfaceType, *ast.FuncType, *ast.StarExpr, *ast.Ellipsis:
+			// Pure type syntax reads nothing.
+			return
+		case *ast.TypeAssertExpr:
+			visit(x.X)
+			return
+		}
+		ast.Inspect(n, func(child ast.Node) bool {
+			if child == nil || child == n {
+				return child == n
+			}
+			visit(child)
+			return false
 		})
+	}
+	for _, expr := range exprs {
+		visit(expr)
 	}
 	sort.Strings(ids)
 	return ids
 }
 
+// ensureState resolves a name to its state node, inventing a root-local one
+// for a name this root never declared. Such a name is almost always declared
+// elsewhere - a package-level variable, or an import - so the node is marked
+// undeclared: within this root the graph cannot see all of its uses.
 func (b *builder) ensureState(name string, src sx.Source) string {
 	if sid, ok := b.stateByName[name]; ok {
 		return sid
 	}
-	return b.ensureLocal(name, src)
+	sid := b.ensureLocal(name, src)
+	for i := range b.graph.Nodes {
+		if b.graph.Nodes[i].ID == sid {
+			if b.graph.Nodes[i].Attributes == nil {
+				b.graph.Nodes[i].Attributes = map[string]any{}
+			}
+			b.graph.Nodes[i].Attributes["declared_in_root"] = false
+			break
+		}
+	}
+	return sid
 }
 
 func (b *builder) ensureLocal(name string, src sx.Source) string {
@@ -537,6 +658,13 @@ func (b *builder) read(from, to string, src sx.Source) {
 
 func (b *builder) write(from, to string, src sx.Source) {
 	b.edge("write", from, to, src, nil)
+}
+
+// writeThrough records a write reaching a variable through a selector or an
+// index, as in n.Field = v or m[k] = v. The variable itself is not replaced,
+// so a consumer must not read this as "the variable is only ever assigned".
+func (b *builder) writeThrough(from, to string, src sx.Source) {
+	b.edge("write", from, to, src, map[string]any{"target": "indirect"})
 }
 
 func (b *builder) edge(kind, from, to string, src sx.Source, attrs map[string]any) {
@@ -645,14 +773,44 @@ func receiverName(expr ast.Expr) string {
 	}
 }
 
+// indexExprs returns the subscript expressions of an assignment target, which
+// are read even though the target itself is written.
+func indexExprs(expr ast.Expr) []ast.Expr {
+	var out []ast.Expr
+	for {
+		switch x := expr.(type) {
+		case *ast.IndexExpr:
+			out = append(out, x.Index)
+			expr = x.X
+		case *ast.SelectorExpr:
+			expr = x.X
+		case *ast.StarExpr:
+			expr = x.X
+		default:
+			return out
+		}
+	}
+}
+
 func stateName(expr ast.Expr) string {
 	switch x := expr.(type) {
 	case *ast.Ident:
 		return x.Name
 	case *ast.SelectorExpr:
-		return stateName(x.X) + "." + x.Sel.Name
+		// Writing n.Field writes n. Naming the target "n.Field" makes it a
+		// different node from the one reads resolve to, and state nodes are
+		// root-local, so a field written in one method and read in another
+		// never meets its reads at all. Field granularity is not recoverable
+		// without type information, and pretending to have it is worse than
+		// not having it: analysis reads the write-only half as dead.
+		return stateName(x.X)
 	case *ast.IndexExpr:
-		return stateName(x.X) + "[]"
+		// Writing m[k] writes to m. Giving the indexed form its own name mints
+		// a second state node for one variable: it collects the writes while
+		// the base collects the reads, so the element node looks written but
+		// never read, and the base looks read but never written. Both halves
+		// are wrong, and analysis over the graph reads them as dead state.
+		return stateName(x.X)
 	default:
 		return ""
 	}
