@@ -1,0 +1,3 @@
+module evalengine
+
+go 1.25

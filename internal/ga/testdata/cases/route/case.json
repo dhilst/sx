@@ -1,0 +1,5 @@
+{
+  "name": "route",
+  "summary": "PR adds a command dispatcher written as a long else-if chain with duplicated guards",
+  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
+}

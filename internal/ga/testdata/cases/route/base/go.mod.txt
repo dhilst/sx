@@ -1,0 +1,3 @@
+module evalroute
+
+go 1.25

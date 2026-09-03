@@ -1,0 +1,3 @@
+module evalparse
+
+go 1.25

@@ -1,0 +1,5 @@
+{
+  "name": "wrap",
+  "summary": "PR adds an accumulator threaded through a chain of trivial forwarding wrappers and redundant locals",
+  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
+}

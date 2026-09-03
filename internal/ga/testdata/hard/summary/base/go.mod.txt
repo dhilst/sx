@@ -1,0 +1,3 @@
+module evalsummary
+
+go 1.25

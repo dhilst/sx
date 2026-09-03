@@ -1,0 +1,5 @@
+{
+  "name": "parse",
+  "summary": "PR adds a config parser with a hand-rolled scan loop and deeply nested validation arms",
+  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
+}

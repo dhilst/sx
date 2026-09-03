@@ -1,0 +1,5 @@
+{
+  "name": "validate",
+  "summary": "PR adds field validation whose arms report an asymmetric number of problems, so a naive flattening loses one",
+  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
+}

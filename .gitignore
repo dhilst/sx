@@ -1,0 +1,5 @@
+# Prompt optimizer run artifacts: prompts, per-round records, work repositories.
+.sxga/
+
+# Translation cache fallback when no .git directory is available.
+.sx-cache/

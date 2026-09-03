@@ -1,0 +1,5 @@
+{
+  "name": "engine",
+  "summary": "PR adds a ten-arm operation ladder where arms returning the same value report different statuses",
+  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
+}
