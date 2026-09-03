@@ -92,10 +92,14 @@ An exact figure requires applying the rewrite to the graph and rescoring.
 
 Repository scoring walks `.go` files, excluding `_test.go`, and skips what the
 go tool itself ignores: directories beginning with `.` or `_`, plus `vendor`
-and `testdata`. Build constraints are honoured, so a package with per-platform
-files scores the files that build for this platform; scores are therefore
-platform-specific, exactly as the compiled program is. Fixtures and build artifacts are not the program, and charging
+and `testdata`. Fixtures and build artifacts are not the program, and charging
 a repository for them makes its score meaningless.
+
+Build constraints are honoured, so a package with per-platform files scores the
+files that build for this platform. Scores are therefore platform-specific,
+exactly as the compiled program is. Without this, any package carrying
+`_unix.go` and `_windows.go` variants fails outright: both declare the same
+functions, and the merge sees duplicate identities.
 
 `--ignore` takes a comma-separated list of globs on top of that, accepted by
 `repo`, `pr`, and `suggest`:
