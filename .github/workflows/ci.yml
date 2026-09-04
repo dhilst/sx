@@ -37,8 +37,5 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
-      # sx could not score its own repository until packages were identified by
-      # path: several `main` packages collided on merge. Scoring this repo in CI
-      # keeps that fixed.
       - name: score this repository
-        run: go run ./cmd/sx repo .
+        run: go run ./cmd/sc .
