@@ -26,13 +26,8 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	if len(args) > 0 {
-		switch args[0] {
-		case "refactor":
-			return cmdRefactor(args[1:], stdout, stderr)
-		case "beam":
-			return cmdBeam(args[1:], stdout, stderr)
-		}
+	if len(args) > 0 && args[0] == "refactor" {
+		return cmdRefactor(args[1:], stdout, stderr)
 	}
 	fs := flag.NewFlagSet("sc", flag.ContinueOnError)
 	fs.SetOutput(stderr)

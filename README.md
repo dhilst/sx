@@ -31,7 +31,7 @@ effects for the same inputs and state. Three things remove nodes.
 |---|---|---|
 | **dead code** | a declaration nothing can reach | −41 in one move, the largest single win |
 | **duplication** | the same code written more than once | −39 in one move |
-| **inlining** | a function that only forwards | 19 moves, −2 to −27 each |
+| **inlining** | a function that only forwards | 17 moves, −2 to −27 each |
 
 Detection is this tool's job. The transformations are not, wherever a maintained
 tool already does one properly:
@@ -67,31 +67,36 @@ unfinished, not unsafe. Unused imports are tidied and the build retried. Nothing
 else is repaired, because a fix that needs to guess what the author meant is
 another edit, with its own measurement and its own gate.
 
-## Searching sequences
+## Why greedy
 
-Greedy is wrong when a move only pays by enabling another. Inlining is the case
-that made it concrete: on its own it always makes the program bigger, because
-the body then exists at the call site *and* in the declaration. It only becomes
-a saving once the declaration goes, so the two are applied as one move and
+Greedy is wrong when a move only pays by enabling another, and inlining is
+exactly that case: on its own it always makes the program bigger, because the
+body then exists at the call site *and* in the declaration. It only becomes a
+saving once the declaration goes. So the two are applied as one move, and
 `deadcode` confirms the abstraction really can go.
 
-For the general shape of that problem — the phase-ordering problem — there is a
-beam search:
+With that pair made atomic, searching over orderings stops paying. A beam search
+was built and measured against the greedy loop on this codebase:
 
-```bash
-go run ./cmd/sc beam [-width 3] [-depth 4] [-branch 3] [-apply] <dir>
+```text
+greedy    -318 nodes (-4.0%), 22 changes, converged      2m11s
+beam      -174 nodes (-2.2%),  8 changes, depth-limited  6m01s
 ```
 
-It keeps the best few programs at each depth, each in its own directory, and
-fingerprints them so two routes to the same code are explored once. It has not
-beaten the greedy loop on this codebase since inline-and-remove became atomic;
-it is insurance against orderings we have not hit.
+It lost for structural reasons rather than tuning ones. A beam of depth d can
+never make more than d changes, while greedy runs until the candidates are gone.
+Width bought nothing: at depth 8 the best six states spanned 8 nodes and were
+permutations of the same moves, because these transformations commute. The one
+thing it found that greedy cannot see was an ordering worth 13 nodes.
+
+So the search was removed. It is worth rebuilding the day a transformation
+appears whose order actually matters.
 
 ## What it does to this repository
 
 ```text
-7914 -> 7596 nodes   (-318, -4.0%)
-22 changes kept, 13 rejected, 2m11s, tests green throughout
+6469 -> 6182 nodes   (-287, -4.4%)
+19 changes kept, 9 rejected, 1m53s, tests green throughout
 ```
 
 It converges: the loop exhausts the candidates rather than running out of
@@ -99,11 +104,17 @@ rounds. That is a fixed point of these three primitives and no more — library
 substitution, condition merging and unused-parameter removal are all untouched,
 and each would move it again.
 
+The largest reduction this repository has seen was not one of them. Deleting the
+beam search took it from 8033 nodes to 6469 — five times what every automated
+change has managed put together. No primitive could have found that: deciding a
+feature does not earn its place needs a comparison against the alternative, not
+a measurement of what is there.
+
 ## What it costs
 
 `min |AST|` says a function called once is always a loss: you pay for the
 declaration, the signature, the return and the call, and get one use back. So it
-deletes single-use abstractions, and the fixed point has none left. Nineteen
+deletes single-use abstractions, and the fixed point has none left. Seventeen
 helpers went that way in the run above.
 
 That is the objective working, not failing, but it is the whole objective. It
