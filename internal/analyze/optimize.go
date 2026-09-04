@@ -30,7 +30,8 @@ type Trajectory struct {
 }
 
 // realizable reports whether a plan kind corresponds to an edit somebody could
-// actually make.
+// actually make. A plan of a realizable kind can still carry a blocker, and
+// bestRealizable refuses those too.
 //
 // excess_arity does not. Its rewrite drops the arity charge by editing the
 // count, but a real edit has to put those parameters somewhere - a struct, with
@@ -54,7 +55,7 @@ func realizable(kind string) bool {
 // The trajectory is a bound and an ordering, not a patch. Each step is exact
 // for the graph; whether the corresponding source edit preserves behaviour is
 // still decided by tests and the behaviour test.
-func Optimize(g *sx.Graph, maxRounds int) (Trajectory, error) {
+func Optimize(g *sx.Graph, maxRounds int, root string) (Trajectory, error) {
 	if maxRounds <= 0 {
 		maxRounds = 25
 	}
@@ -67,7 +68,7 @@ func Optimize(g *sx.Graph, maxRounds int) (Trajectory, error) {
 	seen := map[string]int{}
 
 	for round := 1; round <= maxRounds; round++ {
-		report, err := Analyze(current)
+		report, err := AnalyzeWithSource(current, root)
 		if err != nil {
 			traj.Stopped = fmt.Sprintf("analysis failed at round %d: %v", round, err)
 			break
@@ -122,6 +123,12 @@ func bestRealizable(plans []Plan) (Plan, bool) {
 	found := false
 	for _, p := range plans {
 		if !realizable(p.Kind) || !p.Verified || p.Exact <= 0 {
+			continue
+		}
+		// A blocker means the graph could not establish that the edit is
+		// available. Taking it would put a move in the trajectory that nobody
+		// can make.
+		if len(p.Blockers) > 0 {
 			continue
 		}
 		if !found || p.Exact > best.Exact {

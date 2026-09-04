@@ -291,7 +291,7 @@ func cmdAnalyze(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	report, err := analyze.Analyze(g)
+	report, err := analyze.AnalyzeWithSource(g, target)
 	if err != nil {
 		return err
 	}
@@ -345,7 +345,7 @@ func cmdOptimize(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	traj, err := analyze.Optimize(g, *rounds)
+	traj, err := analyze.Optimize(g, *rounds, target)
 	if err != nil {
 		return err
 	}

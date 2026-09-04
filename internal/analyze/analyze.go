@@ -8,7 +8,10 @@
 package analyze
 
 import (
+	"os"
+	"path/filepath"
 	"sort"
+	"strings"
 
 	"purgatrix/internal/sc"
 	"purgatrix/internal/sx"
@@ -64,6 +67,7 @@ type analyzer struct {
 	children map[string][]string
 	parent   map[string]string
 	sigCache map[string]subtreeSignature
+	source   func(path string) ([]string, bool)
 }
 
 // verifyLimit caps how many plans are priced by rewriting and rescoring.
@@ -78,8 +82,42 @@ func Analyze(g *sx.Graph) (Report, error) {
 	return AnalyzeWithLimit(g, verifyLimit)
 }
 
+// AnalyzeWithSource is Analyze with the source tree available, which lets the
+// duplicate pass confirm a match against the actual bytes instead of resting on
+// structure alone.
+func AnalyzeWithSource(g *sx.Graph, root string) (Report, error) {
+	return analyzeWith(g, verifyLimit, sourceReader(root))
+}
+
 // AnalyzeWithLimit is Analyze with control over how many plans get measured.
 func AnalyzeWithLimit(g *sx.Graph, limit int) (Report, error) {
+	return analyzeWith(g, limit, nil)
+}
+
+// sourceReader reads and caches files under root, so a pass can look at the
+// text a span covers.
+func sourceReader(root string) func(string) ([]string, bool) {
+	cache := map[string][]string{}
+	missing := map[string]bool{}
+	return func(path string) ([]string, bool) {
+		if lines, ok := cache[path]; ok {
+			return lines, true
+		}
+		if missing[path] {
+			return nil, false
+		}
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			missing[path] = true
+			return nil, false
+		}
+		lines := strings.Split(string(data), "\n")
+		cache[path] = lines
+		return lines, true
+	}
+}
+
+func analyzeWith(g *sx.Graph, limit int, source func(string) ([]string, bool)) (Report, error) {
 	if err := sx.Validate(g); err != nil {
 		return Report{}, err
 	}
@@ -92,6 +130,7 @@ func AnalyzeWithLimit(g *sx.Graph, limit int) (Report, error) {
 		children: map[string][]string{},
 		parent:   map[string]string{},
 		sigCache: map[string]subtreeSignature{},
+		source:   source,
 	}
 	for _, n := range g.Nodes {
 		a.nodes[n.ID] = n
@@ -317,8 +356,10 @@ func (a *analyzer) excessArity() []Plan {
 			Detail:    attrString(n, "identity") + " carries " + plural(params, "parameter") + " and " + plural(results, "result"),
 			NodeID:    rid,
 			Anchor:    rid,
-			Blockers:  []string{"changing a signature touches every caller"},
-			Source:    n.Source,
+			Blockers: []string{
+				"this is a cost attribution, not a transformation: the parameters have to go somewhere, and a struct to hold them costs at least as much (measured twice against this codebase)",
+			},
+			Source: n.Source,
 		})
 	}
 	return plans

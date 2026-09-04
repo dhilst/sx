@@ -5,6 +5,7 @@ import (
 	"encoding/hex"
 	"fmt"
 	"sort"
+	"strings"
 
 	"purgatrix/internal/sx"
 )
@@ -28,6 +29,48 @@ type subtreeSignature struct {
 	hash   string
 	weight int
 	nodes  []string
+}
+
+// sourceText returns the exact text a node spans, using the source map, or
+// false when the file is unavailable or the span is synthetic.
+func (a *analyzer) sourceText(n sx.Node) (string, bool) {
+	if a.source == nil || n.Source.Synthetic {
+		return "", false
+	}
+	lines, ok := a.source(n.Source.Path)
+	if !ok || n.Source.EndLine > len(lines) || n.Source.StartLine < 1 {
+		return "", false
+	}
+	var out []string
+	for i := n.Source.StartLine; i <= n.Source.EndLine; i++ {
+		line := strings.TrimSpace(lines[i-1])
+		// Comments and blank lines differ between copies of the same code.
+		if line == "" || strings.HasPrefix(line, "//") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n"), true
+}
+
+// textIdentical reports whether every occurrence spans the same code. The
+// graph cannot prove two subtrees are the same, but the source map can: it
+// hands back the exact bytes each one covers.
+func (a *analyzer) textIdentical(group []subtreeSignature) (bool, bool) {
+	first, ok := a.sourceText(a.nodes[group[0].nodes[0]])
+	if !ok || first == "" {
+		return false, false
+	}
+	for _, s := range group[1:] {
+		text, ok := a.sourceText(a.nodes[s.nodes[0]])
+		if !ok {
+			return false, false
+		}
+		if text != first {
+			return false, true
+		}
+	}
+	return true, true
 }
 
 func (a *analyzer) duplicateStructure() []Plan {
@@ -55,6 +98,14 @@ func (a *analyzer) duplicateStructure() []Plan {
 			continue
 		}
 		sort.Slice(group, func(i, j int) bool { return group[i].nodes[0] < group[j].nodes[0] })
+
+		// With the source available this stops being a guess for some matches:
+		// compare the bytes each occurrence spans. Byte-identical occurrences
+		// are proven duplicates and carry no caveat. The rest are still worth
+		// reporting - the same logic with renamed variables is a real
+		// duplicate that text comparison cannot see - but they stay marked as
+		// candidates, and the optimizer will not act on them.
+		identical, _ := a.textIdentical(group)
 		anchor := a.nodes[group[0].nodes[0]]
 		var sites []string
 		for _, s := range group {
@@ -67,15 +118,13 @@ func (a *analyzer) duplicateStructure() []Plan {
 			StartLine: anchor.Source.StartLine,
 			EndLine:   anchor.Source.EndLine,
 			Saving:    (len(group) - 1) * group[0].weight,
-			Detail: fmt.Sprintf("%d occurrences of the same %d-weight structure calling the same targets: %s",
-				len(group), group[0].weight, joinLimit(sites, 4)),
-			NodeID: group[0].nodes[0],
-			Anchor: hash,
-			Blockers: []string{
-				"the graph holds no expressions, so identical structure is a strong hint and not proof the code is the same",
-			},
-			Source: anchor.Source,
-			group:  group,
+			Detail: fmt.Sprintf("%d occurrences of %s %d-weight structure: %s",
+				len(group), duplicateConfidence(identical), group[0].weight, joinLimit(sites, 4)),
+			NodeID:   group[0].nodes[0],
+			Anchor:   hash,
+			Blockers: duplicateBlockers(identical),
+			Source:   anchor.Source,
+			group:    group,
 		})
 	}
 	sort.SliceStable(plans, func(i, j int) bool { return plans[i].Saving > plans[j].Saving })
@@ -168,6 +217,24 @@ func (a *analyzer) outermost(group []subtreeSignature) []subtreeSignature {
 		}
 	}
 	return out
+}
+
+// duplicateBlockers says what the finding rests on. Byte-identical text needs
+// no caveat about semantics; a shape-and-calls match does.
+func duplicateBlockers(textIdentical bool) []string {
+	if textIdentical {
+		return nil
+	}
+	return []string{
+		"the graph holds no expressions, so identical structure is a strong hint and not proof the code is the same",
+	}
+}
+
+func duplicateConfidence(textIdentical bool) string {
+	if textIdentical {
+		return "byte-identical"
+	}
+	return "structurally identical"
 }
 
 func joinLimit(items []string, limit int) string {
