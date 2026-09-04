@@ -98,19 +98,30 @@ func scoreFunc(fset *token.FileSet, path string, fn *ast.FuncDecl, w Weights) Fu
 	}
 	f.Statements, f.Locals, f.MaxDepth, f.DeepStmts = walk(fn.Body, w)
 
-	f.LengthCost = overshoot(f.Statements, w.MaxStatements, w.StatementWeight)
-	f.LocalsCost = overshoot(f.Locals, w.MaxLocals, w.LocalWeight)
-	f.ParamsCost = overshoot(f.Params, w.MaxParams, w.ParamWeight)
 	// Nesting is charged on how buried the function is on average, not on its
 	// peak: one deep line is a curiosity, a function whose every statement sits
 	// four levels down is the problem.
+	f.Total = Recompute(f, w)
+	f.LengthCost = overshoot(f.Statements, w.MaxStatements, w.StatementWeight)
+	f.LocalsCost = overshoot(f.Locals, w.MaxLocals, w.LocalWeight)
+	f.ParamsCost = overshoot(f.Params, w.MaxParams, w.ParamWeight)
+	f.NestingCost = f.Total - f.LengthCost - f.LocalsCost - f.ParamsCost
+	return f
+}
+
+// Recompute recalculates a function's cost from its measured dimensions. It
+// lets a caller ask what a function would cost if it were shorter or less
+// deeply nested, without inventing the source that would make it so.
+func Recompute(f Function, w Weights) int {
+	f.LengthCost = overshoot(f.Statements, w.MaxStatements, w.StatementWeight)
+	f.LocalsCost = overshoot(f.Locals, w.MaxLocals, w.LocalWeight)
+	f.ParamsCost = overshoot(f.Params, w.MaxParams, w.ParamWeight)
 	f.NestingCost = 0
 	if f.Statements > 0 {
 		avgDepth := 1 + float64(f.DeepStmts)/float64(f.Statements) + float64(w.MaxDepth) - 1
 		f.NestingCost = overshootF(avgDepth, float64(w.MaxDepth), w.DepthWeight)
 	}
-	f.Total = f.LengthCost + f.LocalsCost + f.ParamsCost + f.NestingCost
-	return f
+	return f.LengthCost + f.LocalsCost + f.ParamsCost + f.NestingCost
 }
 
 // overshoot charges nothing up to the allowance, then grows with the square of

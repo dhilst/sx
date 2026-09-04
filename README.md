@@ -79,6 +79,60 @@ neither is free:
 
 Both directions are pinned by tests in `internal/cost`.
 
+## Refactoring
+
+`sc refactor` lowers the measured cost by extracting nested blocks. It does not
+implement refactorings:
+
+```bash
+go install golang.org/x/tools/gopls@latest
+go run ./cmd/sc refactor [-apply] [-n 5] [-min-statements 3] <dir>
+```
+
+**gopls performs the extraction**, because it has the type information needed
+to work out a block's free variables and return values, and to refuse when the
+extraction is not legal. **Choosing which block to extract is this tool's job**,
+because gopls has no notion of which extraction is worth doing — it will
+happily extract any selection you name.
+
+Nothing is taken on trust. After each extraction the tree is re-scored and
+rebuilt, and a change that does not lower the cost, or that stops the package
+building, is reverted:
+
+```text
+cost 9
+  extracted p.go:7 from Process  cost 9 -> 5 (-4, predicted -1)
+```
+
+The prediction only orders the attempts. The saving that counts is the one
+measured afterwards, and as the line above shows the two differ.
+
+### What limits it
+
+A block containing `return`, `break` or `continue` is not offered. gopls will
+extract one, but it has to invent a protocol to carry the control flow out:
+
+```go
+var shouldReturn bool
+total, i, err, shouldReturn = newFunction(x, total)
+if shouldReturn {
+	return i, err
+}
+```
+
+That is mechanically correct and worse to read, which is the opposite of the
+point. Excluding those blocks has a measurable cost, though, because idiomatic
+Go puts a `return` inside almost every nested block:
+
+```text
+                  blocks of 3+ statements   escaping   cleanly extractable
+this repository                        13    12 (92%)              1 (7%)
+stdlib sample                         111    79 (71%)             32 (28%)
+```
+
+So extraction reaches between a tenth and a third of the nested blocks in real
+Go. The rest need a different transformation, or a reader.
+
 ## Status
 
 A prototype. The weights and allowances are guesses that produce sensible
