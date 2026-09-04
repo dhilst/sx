@@ -1,3 +1,0 @@
-module evalwrap
-
-go 1.25

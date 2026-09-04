@@ -1,5 +1,0 @@
-{
-  "name": "grade",
-  "summary": "PR adds a grade classifier written as deeply nested if/else chains",
-  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
-}

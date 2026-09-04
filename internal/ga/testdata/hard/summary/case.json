@@ -1,5 +1,0 @@
-{
-  "name": "summary",
-  "summary": "PR adds a nested summary formatter whose singular and plural arms differ, so a unified rewrite changes printed bytes",
-  "dbt_command": "go test ./... >/dev/null 2>&1 && go run ./cmd/app"
-}

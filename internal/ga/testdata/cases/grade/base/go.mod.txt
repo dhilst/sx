@@ -1,3 +1,0 @@
-module evalgrade
-
-go 1.25
