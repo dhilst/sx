@@ -58,14 +58,52 @@ does not shrink the program, or that breaks the build, or that fails the tests,
 is put back.
 
 The prediction attached to each candidate only orders the attempts. It is
-routinely wrong in both directions — it said −27 for something worth −8, and
-−14 for something worth −39 — so the measurement afterwards is what decides.
+routinely wrong in both directions - it said -27 for something worth -8, and
+-14 for something worth -39 - so the measurement afterwards is what decides.
 
 A failed build is read before it is judged. Removing the last user of a package
 leaves its import behind, and Go will not compile that: the transformation was
 unfinished, not unsafe. Unused imports are tidied and the build retried. Nothing
 else is repaired, because a fix that needs to guess what the author meant is
 another edit, with its own measurement and its own gate.
+
+## What a change can break is not what it touches
+
+The tests that run are the changed package's **and every package that imports
+it**, which `go list` works out once per run.
+
+Testing only what was edited is not a smaller version of this - it is a
+different thing that looks the same. Refactoring `internal/runtime/maps` passed
+that package's own suite, which is good enough to reject six other inlines in
+the same run, and left `reflect` corrupting type descriptors:
+
+```text
+fatal error: runtime: name offset base pointer out of range
+```
+
+The whole standard library still built, and every per-package gate was green.
+It took running `crypto/aes`'s tests to see it. The honest gate costs what it
+costs: for that package it is 261 packages and four and a half minutes per
+attempted change.
+
+## Where it will not go
+
+Three gates - build, tests, measure - agree on a great deal that is wrong,
+because each has a boundary and the loop finds whatever lives outside it. So
+the boundaries are declared rather than discovered:
+
+| left alone | because |
+|---|---|
+| files this build does not compile | `go build` and `go test` cannot say whether the edit is safe. Editing them rewrote Windows, plan9, wasip1 and s390x source with every gate green |
+| generated files | the edit is erased on the next run, and the file says so |
+| test files | the measure does not count them, so moving a body there reads as a saving. On a two-function package: 29 nodes to 12, nothing deleted |
+| bodies using `unsafe` | what `unsafe.Pointer` guarantees depends on where a value lives and how long. `reflectlite.packEface` carries a comment that its correctness depends on no operation coming between two assignments |
+| functions under a `//go:` directive | `//go:nosplit` fixes a stack budget; moving a body in is what it forbids |
+| names declared once per platform | which one a call resolves to is a build-tag question |
+| functions held as values | `var Exported = unexported` in an export_test.go is a live reference that is not a call |
+
+Every one of those was found by running this on the Go standard library, and
+every one of them built, passed its tests, and measured smaller.
 
 ## Why greedy
 
@@ -92,23 +130,50 @@ thing it found that greedy cannot see was an ordering worth 13 nodes.
 So the search was removed. It is worth rebuilding the day a transformation
 appears whose order actually matters.
 
-## What it does to this repository
+## What it does
+
+On its own source, to a fixed point:
 
 ```text
-6469 -> 6182 nodes   (-287, -4.4%)
-19 changes kept, 9 rejected, 1m53s, tests green throughout
+8369 -> 8289 nodes   (-80, -1.0%)
+8 changes kept, 21 attempted
 ```
 
-It converges: the loop exhausts the candidates rather than running out of
-rounds. That is a fixed point of these three primitives and no more — library
-substitution, condition merging and unused-parameter removal are all untouched,
-and each would move it again.
+Running it again keeps nothing: a second pass re-offers everything the first
+rejected, in the same order, with the same verdicts. It is a fixed point of
+these three primitives and no more.
 
-The largest reduction this repository has seen was not one of them. Deleting the
-beam search took it from 8033 nodes to 6469 — five times what every automated
-change has managed put together. No primitive could have found that: deciding a
-feature does not earn its place needs a comparison against the alternative, not
-a measurement of what is there.
+On 55 packages of the Go standard library, gated on every importer, with the
+result left building and passing `go test std`:
+
+```text
+nodes  294086 -> 292157   (-1929, -0.7%)
+raw     77674 ->  76250   (-1424, -1.8%)
+code    53605 ->  53343   ( -262, -0.5%)
+156 changes kept
+```
+
+Read those three lines together. **Of the 1424 lines removed, 1162 are comments
+and blank lines** - removing a function deletes its documentation, while the
+body does not go anywhere, it moves to the call site. Half a percent of the code
+went. "1424 lines saved" would be mostly a report of deleted documentation.
+
+That is 55 of the 117 leaf packages with candidates. Twelve more were already
+failing or too slow to gate. The remaining fifty were left out because gating
+them honestly is unaffordable - `internal/cpu` has 267 importers,
+`internal/runtime/maps` 260 - and those are exactly the packages with the most
+to remove. The excluded half is the expensive half, not a random sample.
+
+For comparison, from this repository's own history:
+
+```text
+deleting the beam search        -1564 nodes of 8033    (-19.5%)
+the standard library sweep      -1929 nodes of 294086   (-0.7%)
+```
+
+Deciding one feature did not earn its place beat the whole automated pipeline
+applied to the standard library. Nothing here can find that: it measures what
+exists, and cannot ask whether it should.
 
 ## What it costs
 

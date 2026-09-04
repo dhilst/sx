@@ -78,16 +78,6 @@ func Count(n ast.Node) int {
 	return total
 }
 
-// CountSource counts the nodes in source held in memory, which is how a caller
-// checks what an edit did before writing it out.
-func CountSource(path, src string) (int, error) {
-	file, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
-	if err != nil {
-		return 0, err
-	}
-	return Count(file), nil
-}
-
 func FuncName(fn *ast.FuncDecl) string {
 	if fn.Recv != nil && len(fn.Recv.List) > 0 {
 		return receiverName(fn.Recv.List[0].Type) + "." + fn.Name.Name

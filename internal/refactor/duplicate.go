@@ -50,7 +50,7 @@ type Occurrence struct {
 
 // DuplicateCandidates finds repeated code worth factoring out.
 func DuplicateCandidates(dir string) ([]Candidate, error) {
-	files, err := goFilesIn(dir)
+	files, err := editableFilesIn(dir)
 	if err != nil {
 		return nil, err
 	}

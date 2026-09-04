@@ -3,10 +3,13 @@ package refactor
 import (
 	"bytes"
 	"fmt"
+	"go/format"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 )
 
 // A failed build is information, not just a verdict.
@@ -43,29 +46,27 @@ func Build(dir string) ([]BuildProblem, error) {
 	if err := cmd.Run(); err == nil {
 		return nil, nil
 	}
-	return parseBuildErrors(stderr.String(), dir), nil
-}
-
-func parseBuildErrors(text, dir string) []BuildProblem {
-	var out []BuildProblem
-	for _, line := range strings.Split(text, "\n") {
-		line = strings.TrimSpace(line)
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
+	return func() []BuildProblem {
+		var out []BuildProblem
+		for _, line := range strings.Split(stderr.String(), "\n") {
+			line = strings.TrimSpace(line)
+			if line == "" || strings.HasPrefix(line, "#") {
+				continue
+			}
+			parts := strings.SplitN(line, ":", 4)
+			if len(parts) < 4 {
+				continue
+			}
+			file := parts[0]
+			if !filepath.IsAbs(file) {
+				file = filepath.Join(dir, file)
+			}
+			lineNo := 0
+			fmt.Sscanf(parts[1], "%d", &lineNo)
+			out = append(out, BuildProblem{File: file, Line: lineNo, Message: strings.TrimSpace(parts[3])})
 		}
-		parts := strings.SplitN(line, ":", 4)
-		if len(parts) < 4 {
-			continue
-		}
-		file := parts[0]
-		if !filepath.IsAbs(file) {
-			file = filepath.Join(dir, file)
-		}
-		lineNo := 0
-		fmt.Sscanf(parts[1], "%d", &lineNo)
-		out = append(out, BuildProblem{File: file, Line: lineNo, Message: strings.TrimSpace(parts[3])})
-	}
-	return out
+		return out
+	}(), nil
 }
 
 // Repair attempts to fix what it can and reports whether the tree builds
@@ -102,6 +103,43 @@ func Repair(dir string) (bool, error) {
 		return false, err
 	}
 	return len(after) == 0, nil
+}
+
+// Format puts the tree back into gofmt form.
+//
+// gopls inlines a call by pasting the body in without re-indenting it, which
+// leaves whole functions sitting at the left margin. |AST| cannot see that -
+// being independent of formatting is the point of the measure - and the build
+// and the tests do not care either, so a change like that passes every gate.
+// The only thing that notices is a human, or CI.
+func Format(dir string, since time.Time) error {
+	files, err := editableFilesIn(dir)
+	if err != nil {
+		return err
+	}
+	for _, path := range files {
+		// Only what this change touched. Formatting the whole tree rewrites
+		// files the change never went near, and the revert restores only the
+		// ones it wrote - so a rejected change would still leave those
+		// reformatted, with nothing to undo them.
+		if st, err := os.Stat(path); err != nil || st.ModTime().Before(since) {
+			continue
+		}
+		src, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		// A file that does not parse is not a formatting problem; the build
+		// gate is what should report it.
+		formatted, err := format.Source(src)
+		if err != nil || bytes.Equal(src, formatted) {
+			continue
+		}
+		if err := os.WriteFile(path, formatted, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // tidyImports drops imports nothing uses any more. gopls owns this because
