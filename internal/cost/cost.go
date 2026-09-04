@@ -1,308 +1,94 @@
-// Package cost models the structural complexity of Go functions.
+// Package cost measures the size of Go code as the number of AST nodes it
+// takes to express it.
 //
-// Four things are charged: how long a function is, how many locals it holds in
-// the reader's head, how many arguments it takes, and how deeply its code is
-// nested. Each has a free allowance, because a function with three parameters
-// is not complicated, and each grows faster than linearly beyond it, because
-// the eighth parameter is worse than the fifth.
+// The objective is min |AST| subject to behaviour: the same outputs and side
+// effects for the same inputs and state. Counting nodes rather than lines makes
+// the measure independent of formatting, and rather than weighing dimensions
+// against one another it has no parameters at all - so there is nothing to tune
+// and nothing to validate against anyone's judgement.
+//
+// The measure is additive: a node costs one wherever it sits. That is the
+// property the previous weighted model lacked, and it is what makes the number
+// usable as a target rather than only as a ranking.
 package cost
 
 import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"math"
 	"path/filepath"
 	"sort"
 )
 
-// Weights and allowances. These are the whole model: everything else is
-// counting. They are exported so a caller can try a different shape without
-// editing the package.
-type Weights struct {
-	// Free allowances. Below these, a dimension costs nothing.
-	MaxStatements int
-	MaxLocals     int
-	MaxParams     int
-	MaxDepth      int
-
-	// Per-unit weights applied to the squared excess.
-	StatementWeight int
-	LocalWeight     int
-	ParamWeight     int
-	DepthWeight     int
-}
-
-func DefaultWeights() Weights {
-	return Weights{
-		MaxStatements: 25,
-		MaxLocals:     5,
-		MaxParams:     3,
-		MaxDepth:      2,
-
-		StatementWeight: 1,
-		LocalWeight:     2,
-		ParamWeight:     3,
-		DepthWeight:     4,
-	}
-}
-
 // Function is one scored function.
 type Function struct {
-	Name       string `json:"name"`
-	File       string `json:"file"`
-	Line       int    `json:"line"`
-	Statements int    `json:"statements"`
-	Locals     int    `json:"locals"`
-	Params     int    `json:"params"`
-	MaxDepth   int    `json:"max_depth"`
-	DeepStmts  int    `json:"deep_statements"`
+	Name  string `json:"name"`
+	File  string `json:"file"`
+	Line  int    `json:"line"`
+	Nodes int    `json:"nodes"`
+}
 
-	LengthCost  int `json:"length_cost"`
-	LocalsCost  int `json:"locals_cost"`
-	ParamsCost  int `json:"params_cost"`
-	NestingCost int `json:"nesting_cost"`
-	Total       int `json:"total"`
+// File is one scored file. Nodes counts the whole file, so declarations that
+// belong to no function - imports, types, constants - are counted too.
+type File struct {
+	Path      string     `json:"path"`
+	Nodes     int        `json:"nodes"`
+	Functions []Function `json:"functions"`
 }
 
 // Report is a scored set of files.
 type Report struct {
 	Total     int        `json:"total"`
+	Files     []File     `json:"files"`
 	Functions []Function `json:"functions"`
 }
 
-// ScoreFile parses one Go file and scores every function in it.
-func ScoreFile(path string, w Weights) ([]Function, error) {
+// ScoreFile counts the nodes in a file and in each of its functions.
+func ScoreFile(path string) (File, error) {
 	fset := token.NewFileSet()
 	file, err := parser.ParseFile(fset, path, nil, 0)
 	if err != nil {
-		return nil, err
+		return File{}, err
 	}
-	var out []Function
+	out := File{Path: filepath.ToSlash(path), Nodes: Count(file)}
 	for _, decl := range file.Decls {
 		fn, ok := decl.(*ast.FuncDecl)
-		if !ok || fn.Body == nil {
+		if !ok {
 			continue
 		}
-		out = append(out, scoreFunc(fset, path, fn, w))
+		out.Functions = append(out.Functions, Function{
+			Name:  FuncName(fn),
+			File:  out.Path,
+			Line:  fset.Position(fn.Pos()).Line,
+			Nodes: Count(fn),
+		})
 	}
 	return out, nil
 }
 
-func scoreFunc(fset *token.FileSet, path string, fn *ast.FuncDecl, w Weights) Function {
-	f := Function{
-		Name:   funcName(fn),
-		File:   filepath.ToSlash(path),
-		Line:   fset.Position(fn.Pos()).Line,
-		Params: countParams(fn),
-	}
-	f.Statements, f.Locals, f.MaxDepth, f.DeepStmts = walk(fn.Body, w)
-
-	// Nesting is charged on how buried the function is on average, not on its
-	// peak: one deep line is a curiosity, a function whose every statement sits
-	// four levels down is the problem.
-	f.Total = Recompute(f, w)
-	f.LengthCost = overshoot(f.Statements, w.MaxStatements, w.StatementWeight)
-	f.LocalsCost = overshoot(f.Locals, w.MaxLocals, w.LocalWeight)
-	f.ParamsCost = overshoot(f.Params, w.MaxParams, w.ParamWeight)
-	f.NestingCost = f.Total - f.LengthCost - f.LocalsCost - f.ParamsCost
-	return f
+// Count is the measure: how many AST nodes this subtree takes.
+func Count(n ast.Node) int {
+	total := 0
+	ast.Inspect(n, func(node ast.Node) bool {
+		if node != nil {
+			total++
+		}
+		return true
+	})
+	return total
 }
 
-// Recompute recalculates a function's cost from its measured dimensions. It
-// lets a caller ask what a function would cost if it were shorter or less
-// deeply nested, without inventing the source that would make it so.
-func Recompute(f Function, w Weights) int {
-	f.LengthCost = overshoot(f.Statements, w.MaxStatements, w.StatementWeight)
-	f.LocalsCost = overshoot(f.Locals, w.MaxLocals, w.LocalWeight)
-	f.ParamsCost = overshoot(f.Params, w.MaxParams, w.ParamWeight)
-	f.NestingCost = 0
-	if f.Statements > 0 {
-		avgDepth := 1 + float64(f.DeepStmts)/float64(f.Statements) + float64(w.MaxDepth) - 1
-		f.NestingCost = overshootF(avgDepth, float64(w.MaxDepth), w.DepthWeight)
+// CountSource counts the nodes in source held in memory, which is how a caller
+// checks what an edit did before writing it out.
+func CountSource(path, src string) (int, error) {
+	file, err := parser.ParseFile(token.NewFileSet(), path, src, 0)
+	if err != nil {
+		return 0, err
 	}
-	return f.LengthCost + f.LocalsCost + f.ParamsCost + f.NestingCost
+	return Count(file), nil
 }
 
-// overshoot charges nothing up to the allowance, then grows with the square of
-// how many times over it the function is.
-//
-// Measuring the overshoot as a ratio rather than a difference is what keeps the
-// four dimensions comparable. Charging the raw difference made length dominate
-// everything - a 156-statement function scored 17161 for its length and 996 for
-// being buried seven levels deep, which is the wrong way round.
-func overshoot(n, free, weight int) int {
-	return overshootF(float64(n), float64(free), weight)
-}
-
-func overshootF(n, free float64, weight int) int {
-	if free <= 0 || n <= free {
-		return 0
-	}
-	ratio := n / free
-	return int(math.Round(float64(weight) * ratio * ratio))
-}
-
-// walk counts statements, distinct locals, peak depth, and how many statements
-// sit below the allowed depth.
-func walk(body *ast.BlockStmt, w Weights) (statements, locals, maxDepth, deepStmts int) {
-	seen := map[string]bool{}
-	var visit func(n ast.Node, depth int)
-	visit = func(n ast.Node, depth int) {
-		if n == nil {
-			return
-		}
-		if depth > maxDepth {
-			maxDepth = depth
-		}
-		if stmt, ok := n.(ast.Stmt); ok {
-			if _, isBlock := stmt.(*ast.BlockStmt); !isBlock {
-				statements++
-				if over := depth - w.MaxDepth; over > 0 {
-					deepStmts += over
-				}
-			}
-		}
-		switch s := n.(type) {
-		case *ast.AssignStmt:
-			if s.Tok == token.DEFINE {
-				for _, lhs := range s.Lhs {
-					if id, ok := lhs.(*ast.Ident); ok && id.Name != "_" && !seen[id.Name] {
-						seen[id.Name] = true
-						locals++
-					}
-				}
-			}
-		case *ast.DeclStmt:
-			if gen, ok := s.Decl.(*ast.GenDecl); ok && gen.Tok == token.VAR {
-				for _, spec := range gen.Specs {
-					if vs, ok := spec.(*ast.ValueSpec); ok {
-						for _, name := range vs.Names {
-							if name.Name != "_" && !seen[name.Name] {
-								seen[name.Name] = true
-								locals++
-							}
-						}
-					}
-				}
-			}
-		case *ast.RangeStmt:
-			for _, e := range []ast.Expr{s.Key, s.Value} {
-				if id, ok := e.(*ast.Ident); ok && id.Name != "_" && !seen[id.Name] {
-					seen[id.Name] = true
-					locals++
-				}
-			}
-		}
-		// Only these constructs bury the code inside them.
-		inner := depth
-		switch n.(type) {
-		case *ast.IfStmt, *ast.ForStmt, *ast.RangeStmt, *ast.SwitchStmt,
-			*ast.TypeSwitchStmt, *ast.SelectStmt, *ast.FuncLit:
-			inner = depth + 1
-		}
-		for _, child := range children(n) {
-			visit(child, inner)
-		}
-	}
-	for _, stmt := range body.List {
-		visit(stmt, 1)
-	}
-	return statements, locals, maxDepth, deepStmts
-}
-
-// children returns the statement-bearing children of a node. Expressions are
-// walked only far enough to find function literals, which carry statements of
-// their own.
-func children(n ast.Node) []ast.Node {
-	var out []ast.Node
-	add := func(nodes ...ast.Node) {
-		for _, c := range nodes {
-			if c != nil && !isNilNode(c) {
-				out = append(out, c)
-			}
-		}
-	}
-	switch s := n.(type) {
-	case *ast.BlockStmt:
-		for _, x := range s.List {
-			add(x)
-		}
-	case *ast.IfStmt:
-		add(s.Init, s.Body, s.Else)
-	case *ast.ForStmt:
-		add(s.Init, s.Post, s.Body)
-	case *ast.RangeStmt:
-		add(s.Body)
-	case *ast.SwitchStmt:
-		add(s.Init, s.Body)
-	case *ast.TypeSwitchStmt:
-		add(s.Init, s.Assign, s.Body)
-	case *ast.CaseClause:
-		for _, x := range s.Body {
-			add(x)
-		}
-	case *ast.SelectStmt:
-		add(s.Body)
-	case *ast.CommClause:
-		add(s.Comm)
-		for _, x := range s.Body {
-			add(x)
-		}
-	case *ast.LabeledStmt:
-		add(s.Stmt)
-	case *ast.DeferStmt:
-		add(s.Call)
-	case *ast.GoStmt:
-		add(s.Call)
-	case *ast.ExprStmt:
-		add(s.X)
-	case *ast.AssignStmt:
-		for _, x := range s.Rhs {
-			add(x)
-		}
-	case *ast.ReturnStmt:
-		for _, x := range s.Results {
-			add(x)
-		}
-	case *ast.CallExpr:
-		add(s.Fun)
-		for _, x := range s.Args {
-			add(x)
-		}
-	case *ast.FuncLit:
-		add(s.Body)
-	}
-	return out
-}
-
-func isNilNode(n ast.Node) bool {
-	switch v := n.(type) {
-	case *ast.BlockStmt:
-		return v == nil
-	case ast.Stmt:
-		return v == nil
-	case ast.Expr:
-		return v == nil
-	}
-	return false
-}
-
-func countParams(fn *ast.FuncDecl) int {
-	n := 0
-	if fn.Type.Params != nil {
-		for _, f := range fn.Type.Params.List {
-			if len(f.Names) == 0 {
-				n++
-				continue
-			}
-			n += len(f.Names)
-		}
-	}
-	return n
-}
-
-func funcName(fn *ast.FuncDecl) string {
+func FuncName(fn *ast.FuncDecl) string {
 	if fn.Recv != nil && len(fn.Recv.List) > 0 {
 		return receiverName(fn.Recv.List[0].Type) + "." + fn.Name.Name
 	}
@@ -319,11 +105,11 @@ func receiverName(e ast.Expr) string {
 	return "?"
 }
 
-// Sort orders functions by cost, worst first.
+// Sort orders functions by size, largest first.
 func Sort(fns []Function) {
 	sort.SliceStable(fns, func(i, j int) bool {
-		if fns[i].Total != fns[j].Total {
-			return fns[i].Total > fns[j].Total
+		if fns[i].Nodes != fns[j].Nodes {
+			return fns[i].Nodes > fns[j].Nodes
 		}
 		if fns[i].File != fns[j].File {
 			return fns[i].File < fns[j].File

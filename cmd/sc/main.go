@@ -26,8 +26,13 @@ func main() {
 }
 
 func run(args []string, stdout, stderr io.Writer) error {
-	if len(args) > 0 && args[0] == "refactor" {
-		return cmdRefactor(args[1:], stdout, stderr)
+	if len(args) > 0 {
+		switch args[0] {
+		case "refactor":
+			return cmdRefactor(args[1:], stdout, stderr)
+		case "beam":
+			return cmdBeam(args[1:], stdout, stderr)
+		}
 	}
 	fs := flag.NewFlagSet("sc", flag.ContinueOnError)
 	fs.SetOutput(stderr)
@@ -42,27 +47,23 @@ func run(args []string, stdout, stderr io.Writer) error {
 		targets = []string{"."}
 	}
 
-	weights := cost.DefaultWeights()
-	var all []cost.Function
+	var report cost.Report
 	for _, target := range targets {
 		files, err := goFiles(target, *tests)
 		if err != nil {
 			return err
 		}
 		for _, f := range files {
-			scored, err := cost.ScoreFile(f, weights)
+			scored, err := cost.ScoreFile(f)
 			if err != nil {
 				return err
 			}
-			all = append(all, scored...)
+			report.Total += scored.Nodes
+			report.Files = append(report.Files, scored)
+			report.Functions = append(report.Functions, scored.Functions...)
 		}
 	}
-	cost.Sort(all)
-
-	report := cost.Report{Functions: all}
-	for _, f := range all {
-		report.Total += f.Total
-	}
+	cost.Sort(report.Functions)
 	if *jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -73,35 +74,15 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func writeText(w io.Writer, report cost.Report, limit int) {
-	fmt.Fprintf(w, "total %d over %d functions\n\n", report.Total, len(report.Functions))
-	fmt.Fprintf(w, "%6s  %5s %5s %5s %5s  %s\n", "COST", "LEN", "VARS", "ARGS", "NEST", "FUNCTION")
-	shown := 0
-	for _, f := range report.Functions {
-		if f.Total == 0 {
-			break // sorted, so everything after this is free too
-		}
-		if limit > 0 && shown >= limit {
-			fmt.Fprintf(w, "... %d more\n", countCharged(report.Functions)-shown)
+	fmt.Fprintf(w, "%d nodes over %d files, %d functions\n\n", report.Total, len(report.Files), len(report.Functions))
+	fmt.Fprintf(w, "%7s  %s\n", "NODES", "FUNCTION")
+	for i, f := range report.Functions {
+		if limit > 0 && i >= limit {
+			fmt.Fprintf(w, "... %d more\n", len(report.Functions)-i)
 			break
 		}
-		fmt.Fprintf(w, "%6d  %5d %5d %5d %5d  %s:%d %s\n",
-			f.Total, f.LengthCost, f.LocalsCost, f.ParamsCost, f.NestingCost,
-			f.File, f.Line, f.Name)
-		shown++
+		fmt.Fprintf(w, "%7d  %s:%d %s\n", f.Nodes, f.File, f.Line, f.Name)
 	}
-	if shown == 0 {
-		fmt.Fprintln(w, "nothing over the allowances")
-	}
-}
-
-func countCharged(fns []cost.Function) int {
-	n := 0
-	for _, f := range fns {
-		if f.Total > 0 {
-			n++
-		}
-	}
-	return n
 }
 
 // goFiles expands a target into the Go files it covers, skipping what the go
