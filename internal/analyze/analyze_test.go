@@ -188,3 +188,75 @@ func TestDeadStateRewriteRemovesTheNodeAndItsEdges(t *testing.T) {
 		}
 	}
 }
+
+// Shape alone is a weak signal, so the hash folds in what each subtree calls.
+// Two blocks of the same shape that call different functions are not a
+// duplicate; two that call the same ones are worth reporting.
+func TestDuplicateStructureUsesCallTargetsNotJustShape(t *testing.T) {
+	const src = `package dup
+
+func alpha(x int) int { return x + 1 }
+func beta(x int) int  { return x + 2 }
+
+func Same(a, b []int) int {
+	total := 0
+	for _, v := range a {
+		if v > 0 {
+			total += alpha(v)
+		}
+	}
+	for _, v := range b {
+		if v > 0 {
+			total += alpha(v)
+		}
+	}
+	return total
+}
+
+func Different(a, b []int) int {
+	total := 0
+	for _, v := range a {
+		if v > 0 {
+			total += alpha(v)
+		}
+	}
+	for _, v := range b {
+		if v > 0 {
+			total += beta(v)
+		}
+	}
+	return total
+}
+`
+	dir := compileSource(t, "dup.go", src)
+	g, err := gofront.CompileFile(filepath.Join(dir, "dup.go"), dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	report, err := Analyze(g)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var dups []Plan
+	for _, p := range report.Plans {
+		if p.Kind == "duplicate_structure" {
+			dups = append(dups, p)
+		}
+	}
+	if len(dups) == 0 {
+		t.Fatal("the two identical loops in Same were not reported")
+	}
+	for _, p := range dups {
+		if !p.Verified {
+			t.Errorf("duplicate plan at %s:%d was not measured by a rewrite", p.Path, p.StartLine)
+		}
+		if len(p.Blockers) == 0 {
+			t.Error("a duplicate plan must say that identical structure is not proof of identical code")
+		}
+		// Every occurrence must sit inside Same; the loops in Different call
+		// different functions and must not be grouped together.
+		if strings.Contains(p.Detail, "occurrences") && strings.Count(p.Detail, ":") < 2 {
+			t.Errorf("plan detail should list the sites: %q", p.Detail)
+		}
+	}
+}

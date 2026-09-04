@@ -28,6 +28,10 @@ type Plan struct {
 	Anchor    string    `json:"anchor"`
 	Blockers  []string  `json:"blockers,omitempty"`
 	Source    sx.Source `json:"source"`
+
+	// group carries the duplicate occurrences so the rewrite can fold them.
+	// It is internal: the JSON contract stays a description of the plan.
+	group []subtreeSignature
 }
 
 // Best is the measured saving when the rewrite could be scored, and the
@@ -59,10 +63,23 @@ type analyzer struct {
 	in       map[string][]sx.Edge
 	children map[string][]string
 	parent   map[string]string
+	sigCache map[string]subtreeSignature
 }
+
+// verifyLimit caps how many plans are priced by rewriting and rescoring.
+// Each measurement clones, canonicalises, validates and rescores the whole
+// graph, which is around a second on a repository-sized one, so pricing every
+// plan costs a minute for a list nobody reads past the top. Plans beyond the
+// limit keep their estimate and say so.
+const verifyLimit = 12
 
 // Analyze runs every pass over the graph.
 func Analyze(g *sx.Graph) (Report, error) {
+	return AnalyzeWithLimit(g, verifyLimit)
+}
+
+// AnalyzeWithLimit is Analyze with control over how many plans get measured.
+func AnalyzeWithLimit(g *sx.Graph, limit int) (Report, error) {
 	if err := sx.Validate(g); err != nil {
 		return Report{}, err
 	}
@@ -74,6 +91,7 @@ func Analyze(g *sx.Graph) (Report, error) {
 		in:       map[string][]sx.Edge{},
 		children: map[string][]string{},
 		parent:   map[string]string{},
+		sigCache: map[string]subtreeSignature{},
 	}
 	for _, n := range g.Nodes {
 		a.nodes[n.ID] = n
@@ -91,6 +109,7 @@ func Analyze(g *sx.Graph) (Report, error) {
 	plans = append(plans, a.deadState()...)
 	plans = append(plans, a.guardInversion()...)
 	plans = append(plans, a.excessArity()...)
+	plans = append(plans, a.duplicateStructure()...)
 	sort.SliceStable(plans, func(i, j int) bool {
 		if plans[i].Saving != plans[j].Saving {
 			return plans[i].Saving > plans[j].Saving
@@ -103,10 +122,15 @@ func Analyze(g *sx.Graph) (Report, error) {
 
 	// Score each rewrite instead of trusting the weight arithmetic. The
 	// estimate models the depth term; only the scorer knows the whole charge.
-	for i := range plans {
-		if exact, err := ExactSaving(g, plans[i]); err == nil {
-			plans[i].Exact = exact
-			plans[i].Verified = true
+	if before, err := Verify(g); err == nil {
+		for i := range plans {
+			if limit >= 0 && i >= limit {
+				break
+			}
+			if exact, err := exactSavingFrom(g, before, plans[i]); err == nil {
+				plans[i].Exact = exact
+				plans[i].Verified = true
+			}
 		}
 	}
 	sort.SliceStable(plans, func(i, j int) bool {

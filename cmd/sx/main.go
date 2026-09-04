@@ -45,6 +45,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdPR(args[1:], stdout)
 	case "analyze":
 		return cmdAnalyze(args[1:], stdout)
+	case "optimize":
+		return cmdOptimize(args[1:], stdout)
 	case "suggest":
 		return cmdSuggest(args[1:], stdout)
 	default:
@@ -54,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: sx <compile|score|repo|pr|analyze|suggest> [args]")
+	fmt.Fprintln(w, "usage: sx <compile|score|repo|pr|analyze|optimize|suggest> [args]")
 }
 
 func cmdCompile(args []string, stdout io.Writer) error {
@@ -315,6 +317,56 @@ func cmdAnalyze(args []string, stdout io.Writer) error {
 	return nil
 }
 
+// cmdOptimize walks IR(0) -> IR(1) -> ... -> IR(N), taking the most valuable
+// realizable rewrite each round until no plan lowers the score. It reports how
+// far the graph can be driven down, and in what order, without touching a file.
+func cmdOptimize(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("optimize", flag.ContinueOnError)
+	jsonOut := fs.Bool("json", false, "emit JSON")
+	ignoreCSV := fs.String("ignore", "", "comma-separated globs to leave out")
+	rounds := fs.Int("rounds", 25, "maximum rewrite rounds")
+	if err := fs.Parse(args); err != nil {
+		return err
+	}
+	ignore, err := parseIgnore(*ignoreCSV)
+	if err != nil {
+		return err
+	}
+	target := "."
+	if fs.NArg() > 0 {
+		target = fs.Arg(0)
+	}
+	var g *sx.Graph
+	if strings.HasSuffix(target, ".go") || strings.HasSuffix(target, ".sx") {
+		g, err = graphForPath(target)
+	} else {
+		g, err = compileRepo(target, ignore)
+	}
+	if err != nil {
+		return err
+	}
+	traj, err := analyze.Optimize(g, *rounds)
+	if err != nil {
+		return err
+	}
+	if *jsonOut {
+		return writeJSON(stdout, traj)
+	}
+	fmt.Fprintf(stdout, "IR(0) = %d\n", traj.Initial)
+	for _, s := range traj.Steps {
+		fmt.Fprintf(stdout, "IR(%d) = %-7d -%-5d %-20s %s:%d\n",
+			s.Round, s.After, s.Saving, s.Plan.Kind, s.Plan.Path, s.Plan.StartLine)
+	}
+	outcome := "stopped: " + traj.Stopped
+	if traj.Converged {
+		outcome = "converged"
+	}
+	fmt.Fprintf(stdout, "\n%s after %d rewrites: %d -> %d, %d removed (%.1f%%)\n",
+		outcome, traj.Rounds, traj.Initial, traj.Final, traj.Saving,
+		100*float64(traj.Saving)/float64(max(1, traj.Initial)))
+	return nil
+}
+
 func cmdPR(args []string, stdout io.Writer) error {
 	fs := flag.NewFlagSet("pr", flag.ContinueOnError)
 	base := fs.String("base", "", "base git ref")
@@ -387,7 +439,7 @@ func cmdSuggest(args []string, stdout io.Writer) error {
 		}
 		out.Add(accepted)
 	} else if *provider != "" {
-		candidates, err := generateCandidatePatches(*provider, *base, *head, prompt, pr)
+		candidates, err := generateCandidatePatches(*provider, *base, *head, prompt, pr, ignore)
 		if err != nil {
 			return err
 		}
@@ -605,6 +657,28 @@ func firstLine(s string) string {
 	return s
 }
 
+// analyzePlans runs the deterministic analyzer over the head being suggested
+// against. A failure here costs the provider its hints, not the run.
+func analyzePlans(headRef string, ignore ignoreGlobs) []analyze.Plan {
+	dir, cleanup, err := sourceDirForRef(headRef)
+	if err != nil {
+		return nil
+	}
+	defer cleanup()
+	g, err := compileRepo(dir, ignore)
+	if err != nil {
+		return nil
+	}
+	report, err := analyze.Analyze(g)
+	if err != nil {
+		return nil
+	}
+	if len(report.Plans) > 20 {
+		return report.Plans[:20]
+	}
+	return report.Plans
+}
+
 func loadPrompt(path string) (string, error) {
 	if path == "" {
 		return suggestionPrompt(), nil
@@ -620,7 +694,7 @@ func loadPrompt(path string) (string, error) {
 	return prompt, nil
 }
 
-func generateCandidatePatches(providerCommand, baseRef, headRef, prompt string, pr PRReport) ([]CandidatePatch, error) {
+func generateCandidatePatches(providerCommand, baseRef, headRef, prompt string, pr PRReport, ignore ignoreGlobs) ([]CandidatePatch, error) {
 	diff, err := gitDiff(baseRef, headRef)
 	if err != nil {
 		return nil, err
@@ -629,7 +703,9 @@ func generateCandidatePatches(providerCommand, baseRef, headRef, prompt string, 
 	if err != nil {
 		return nil, err
 	}
+	plans := analyzePlans(headRef, ignore)
 	ctx := SuggestionContext{
+		Plans:           plans,
 		BaseRef:         baseRef,
 		HeadRef:         headRef,
 		OriginalPRScore: pr.Score,

@@ -98,6 +98,38 @@ and rescoring needs no such reasoning to be right.
 `path/filepath/symlink.go:41` predicts 63. Making the edit by hand and rescoring
 the file charges 63.
 
+## Optimize
+
+`sx optimize` walks IR(0) -> IR(1) -> ... -> IR(N), taking the most valuable
+rewrite each round and re-analysing the result, until no plan lowers the score:
+
+```bash
+sx optimize [-json] [--rounds 25] [--ignore "glob"] .
+```
+
+```text
+IR(0) = 3572
+IR(1) = 3481  -91  duplicate_structure  complexity.go:313
+IR(2) = 3443  -38  duplicate_structure  complexity.go:399
+...
+converged after 5 rewrites: 3572 -> 3411, 161 removed (4.5%)
+```
+
+This is a **bound and an ordering, not a patch**. Each step is exact for the
+graph, the steps must be applied in the order given, and whether the matching
+source edit preserves behaviour is still decided by the tests and the behaviour
+test.
+
+The optimizer only takes rewrites that correspond to an edit somebody could
+actually make. `excess_arity` does not: its rewrite drops the arity charge by
+editing the count, but a real edit has to put those parameters somewhere, and
+that destination costs at least as much. Measured twice against this codebase -
+once the tests broke, once the score did not move - so it is reported and never
+taken.
+
+Pricing a plan clones, canonicalises, validates and rescores the whole graph, so
+`analyze` measures the top plans and leaves the rest estimated.
+
 ## What Gets Scored
 
 Repository scoring walks `.go` files, excluding `_test.go`, and skips what the

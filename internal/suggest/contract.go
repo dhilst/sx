@@ -4,16 +4,25 @@
 // calculate SC scores; sx owns every number in this contract.
 package suggest
 
-import "purgatrix/internal/sc"
+import (
+	"purgatrix/internal/analyze"
+	"purgatrix/internal/sc"
+)
 
 type Context struct {
-	BaseRef            string          `json:"base_ref"`
-	HeadRef            string          `json:"head_ref"`
-	OriginalPRScore    int             `json:"original_pr_score"`
-	BaseTotal          int             `json:"base_total"`
-	HeadTotal          int             `json:"head_total"`
-	HeadRoots          []sc.RootReport `json:"head_roots"`
-	Hotspots           []sc.Hotspot    `json:"hotspots"`
+	BaseRef         string          `json:"base_ref"`
+	HeadRef         string          `json:"head_ref"`
+	OriginalPRScore int             `json:"original_pr_score"`
+	BaseTotal       int             `json:"base_total"`
+	HeadTotal       int             `json:"head_total"`
+	HeadRoots       []sc.RootReport `json:"head_roots"`
+	Hotspots        []sc.Hotspot    `json:"hotspots"`
+
+	// Plans are the deterministic opportunities sx found in the graph, each
+	// with the saving measured by rewriting the graph and rescoring. A
+	// provider does not have to guess what is worth doing.
+	Plans []analyze.Plan `json:"plans,omitempty"`
+
 	HotspotSources     []SourceSnippet `json:"hotspot_sources"`
 	OriginalDiff       string          `json:"original_diff"`
 	Prompt             string          `json:"prompt"`

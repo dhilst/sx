@@ -177,6 +177,26 @@ func composeMessage(ctx suggest.Context, files []sourceFile) string {
 		}
 		fmt.Fprintf(&b, "%s:%d kind=%s contribution=%d\n", h.Path, h.StartLine, h.Kind, h.Contribution)
 	}
+	if len(ctx.Plans) > 0 {
+		b.WriteString("\n=== OPPORTUNITIES sx ALREADY FOUND AND PRICED ===\n")
+		b.WriteString("Each saving below was measured by applying the change to sx's graph and rescoring it.\n")
+		b.WriteString("Prefer these over anything you find yourself; a plan with a blocker needs care.\n")
+		for i, p := range ctx.Plans {
+			if i >= 12 {
+				break
+			}
+			saving := p.Saving
+			how := "estimated"
+			if p.Verified {
+				saving = p.Exact
+				how = "measured"
+			}
+			fmt.Fprintf(&b, "- %s at %s:%d saves %d (%s): %s\n", p.Kind, p.Path, p.StartLine, saving, how, p.Detail)
+			for _, blocker := range p.Blockers {
+				fmt.Fprintf(&b, "    caution: %s\n", blocker)
+			}
+		}
+	}
 	if len(ctx.Transformations) > 0 {
 		b.WriteString("\n=== TRANSFORMATIONS sx REWARDS ===\n")
 		for _, t := range ctx.Transformations {
