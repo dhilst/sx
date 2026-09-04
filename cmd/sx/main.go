@@ -45,8 +45,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 		return cmdPR(args[1:], stdout)
 	case "analyze":
 		return cmdAnalyze(args[1:], stdout)
-	case "optimize":
-		return cmdOptimize(args[1:], stdout)
+	case "apply":
+		return cmdApply(args[1:], stdout)
 	case "suggest":
 		return cmdSuggest(args[1:], stdout)
 	default:
@@ -56,7 +56,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 }
 
 func usage(w io.Writer) {
-	fmt.Fprintln(w, "usage: sx <compile|score|repo|pr|analyze|optimize|suggest> [args]")
+	fmt.Fprintln(w, "usage: sx <compile|score|repo|pr|analyze|apply|suggest> [args]")
 }
 
 func cmdCompile(args []string, stdout io.Writer) error {
@@ -317,14 +317,18 @@ func cmdAnalyze(args []string, stdout io.Writer) error {
 	return nil
 }
 
-// cmdOptimize walks IR(0) -> IR(1) -> ... -> IR(N), taking the most valuable
-// realizable rewrite each round until no plan lowers the score. It reports how
-// far the graph can be driven down, and in what order, without touching a file.
-func cmdOptimize(args []string, stdout io.Writer) error {
-	fs := flag.NewFlagSet("optimize", flag.ContinueOnError)
-	jsonOut := fs.Bool("json", false, "emit JSON")
+// cmdApply closes the loop: code -> IR(0) -> ... -> IR(N) -> code.
+//
+// The final graph cannot be printed back to Go - it holds no expressions and no
+// types - so instead the trajectory is replayed against the source. Each step
+// is anchored to the span the graph recorded, the file is re-read and
+// re-analysed between steps because every edit moves the spans after it, and an
+// edit whose measured effect does not match its plan is put back.
+func cmdApply(args []string, stdout io.Writer) error {
+	fs := flag.NewFlagSet("apply", flag.ContinueOnError)
 	ignoreCSV := fs.String("ignore", "", "comma-separated globs to leave out")
-	rounds := fs.Int("rounds", 25, "maximum rewrite rounds")
+	rounds := fs.Int("rounds", 25, "maximum edits")
+	dryRun := fs.Bool("dry-run", false, "report the edits without writing them")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -332,39 +336,93 @@ func cmdOptimize(args []string, stdout io.Writer) error {
 	if err != nil {
 		return err
 	}
-	target := "."
+	root := "."
 	if fs.NArg() > 0 {
-		target = fs.Arg(0)
+		root = fs.Arg(0)
 	}
-	var g *sx.Graph
-	if strings.HasSuffix(target, ".go") || strings.HasSuffix(target, ".sx") {
-		g, err = graphForPath(target)
-	} else {
-		g, err = compileRepo(target, ignore)
+	applied, total := 0, 0
+	for round := 1; round <= *rounds; round++ {
+		g, err := compileRepo(root, ignore)
+		if err != nil {
+			return err
+		}
+		before, err := analyze.Verify(g)
+		if err != nil {
+			return err
+		}
+		report, err := analyze.AnalyzeWithSource(g, root)
+		if err != nil {
+			return err
+		}
+		edit, plan, ok, err := nextEdit(root, report)
+		if err != nil {
+			return err
+		}
+		if !ok {
+			fmt.Fprintf(stdout, "\nno further edit can be derived without a model\n")
+			break
+		}
+		if *dryRun {
+			fmt.Fprintf(stdout, "%-18s %s:%d  -%d (predicted)\n    %s\n",
+				plan.Kind, plan.Path, plan.StartLine, plan.Best(), edit.Rationale)
+			break
+		}
+		revert, err := analyze.Apply(root, edit)
+		if err != nil {
+			return err
+		}
+		after, err := compileRepo(root, ignore)
+		if err != nil {
+			revert()
+			return fmt.Errorf("edit did not compile to .sx, reverted: %w", err)
+		}
+		measured, matched, err := analyze.CheckPrediction(before, after, plan.Best())
+		if err != nil {
+			revert()
+			return err
+		}
+		if measured <= 0 {
+			revert()
+			fmt.Fprintf(stdout, "%-18s %s:%d  reverted: measured %+d\n", plan.Kind, plan.Path, plan.StartLine, -measured)
+			break
+		}
+		note := "as predicted"
+		if !matched {
+			note = fmt.Sprintf("predicted %d", plan.Best())
+		}
+		fmt.Fprintf(stdout, "%-18s %s:%d  -%d (%s)\n", plan.Kind, plan.Path, plan.StartLine, measured, note)
+		applied++
+		total += measured
 	}
-	if err != nil {
-		return err
+	if !*dryRun {
+		fmt.Fprintf(stdout, "\n%d edits applied, %d removed\n", applied, total)
+		fmt.Fprintln(stdout, "the score is verified; behaviour is not. run the tests.")
 	}
-	traj, err := analyze.Optimize(g, *rounds, target)
-	if err != nil {
-		return err
-	}
-	if *jsonOut {
-		return writeJSON(stdout, traj)
-	}
-	fmt.Fprintf(stdout, "IR(0) = %d\n", traj.Initial)
-	for _, s := range traj.Steps {
-		fmt.Fprintf(stdout, "IR(%d) = %-7d -%-5d %-20s %s:%d\n",
-			s.Round, s.After, s.Saving, s.Plan.Kind, s.Plan.Path, s.Plan.StartLine)
-	}
-	outcome := "stopped: " + traj.Stopped
-	if traj.Converged {
-		outcome = "converged"
-	}
-	fmt.Fprintf(stdout, "\n%s after %d rewrites: %d -> %d, %d removed (%.1f%%)\n",
-		outcome, traj.Rounds, traj.Initial, traj.Final, traj.Saving,
-		100*float64(traj.Saving)/float64(max(1, traj.Initial)))
 	return nil
+}
+
+// nextEdit finds the best plan that can be lowered back to source.
+func nextEdit(root string, report analyze.Report) (analyze.Edit, analyze.Plan, bool, error) {
+	read := func(path string) ([]string, bool) {
+		data, err := os.ReadFile(filepath.Join(root, path))
+		if err != nil {
+			return nil, false
+		}
+		return strings.Split(string(data), "\n"), true
+	}
+	for _, p := range report.Plans {
+		if len(p.Blockers) > 0 || !p.Verified || p.Best() <= 0 {
+			continue
+		}
+		edit, ok, err := analyze.EmitEdit(root, p, read)
+		if err != nil {
+			return analyze.Edit{}, p, false, err
+		}
+		if ok {
+			return edit, p, true, nil
+		}
+	}
+	return analyze.Edit{}, analyze.Plan{}, false, nil
 }
 
 func cmdPR(args []string, stdout io.Writer) error {
