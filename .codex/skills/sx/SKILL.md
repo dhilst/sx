@@ -130,7 +130,10 @@ Procedure:
 9. In `all` mode, copy the accepted diff back to the original repository after
    tests pass.
 10. In `auto` mode, apply only the changes you judge acceptable. Explain any
-    rejected changes briefly.
+    rejected changes briefly. Before applying, give each function `gopls`
+    extracted (`newFunction`, `newFunction1`, ...) a name that says what it
+    does, with `gopls rename -w <file>:<line>:<col> <name>`. Renaming changes
+    no node count and makes most extractions worth keeping.
 11. Remove the temporary worktree:
 
     ```bash

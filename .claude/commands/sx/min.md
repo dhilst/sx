@@ -107,7 +107,15 @@ Steps:
    ```
 
 8. In `all` mode, apply the full accepted diff back to the original checkout.
-   In `auto` mode, apply only changes that are worth keeping after review.
+   In `auto` mode, apply only changes that are worth keeping after review, and
+   first give each function `gopls` extracted (`newFunction`, `newFunction1`,
+   ...) a name that says what it does:
+
+   ```bash
+   gopls rename -w "$tmp/worktree/path/file.go:LINE:COL" validRowsBefore
+   ```
+
+   Renaming changes no node count and makes most extractions worth keeping.
 
 9. Remove the worktree:
 
