@@ -10,6 +10,22 @@ Use `sx` as a patch generator, not as an automatic cleanup tool. It optimizes
 for small code, so you should review every diff and keep only the changes that
 also make the code easier to maintain.
 
+## Structural Complexity
+
+In `sx`, structural complexity has a deliberately naive definition: `|AST|`, the
+number of Go AST nodes needed to express a program. This is a design choice, not
+a claim that all complexity is syntax. Formatting, comments, and blank lines do
+not count; syntax does. That makes the objective simple, reproducible, and
+optimizable: smaller `|AST|` is the target function. More declarations, wrappers,
+conditionals, calls, expressions, and repeated statement runs all add structure
+that future changes have to move around. AI coding tools tend to increase that
+structure because they can cheaply add helper functions, fallback paths,
+adapters, branches, and duplicated special cases. `sx` pushes in the opposite
+direction: it measures the structure with `go tool sx .`, proposes edits that
+should remove AST nodes, and keeps only the ones that still build, pass tests,
+and reduce the measured count. The examples below show the kind of local
+reductions that add up to a smaller codebase.
+
 ## Who This Is For
 
 Use `sx` when you want to:
