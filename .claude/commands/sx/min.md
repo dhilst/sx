@@ -24,8 +24,18 @@ Steps:
    git status --short
    ```
 
-   If the tree is dirty, tell the user before continuing. Do not silently ignore
-   uncommitted or untracked files.
+   If the tree is dirty, stop and ask the user which they want:
+
+   - commit the changes first, so the run starts from what they actually have
+   - abort
+
+   Do not continue without an answer, and do not fall back to minimizing `HEAD`
+   while uncommitted changes sit beside it. The worktree is created from `HEAD`,
+   so the resulting diff would be against code the user does not have, and may
+   not even apply to their tree.
+
+   Untracked files count. A new package that was never added is invisible to
+   the run, and a change that looks safe without it may not be.
 
 3. Create a disposable worktree:
 

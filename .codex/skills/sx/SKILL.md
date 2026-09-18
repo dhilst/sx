@@ -24,9 +24,13 @@ Default mode is `auto`.
 Procedure:
 
 1. Find the target repository root with `git rev-parse --show-toplevel`.
-2. Check `git status --short`. If the tree is dirty, tell the user that the
-   worktree run starts from `HEAD`; ask before trying to include uncommitted or
-   untracked files.
+2. Check `git status --short`. If the tree is dirty, stop and ask the user
+   whether to commit the changes first or abort. Do not continue without an
+   answer, and do not fall back to minimizing `HEAD` while uncommitted changes
+   sit beside it: the worktree is created from `HEAD`, so the diff would be
+   against code the user does not have and may not apply to their tree.
+   Untracked files count - a package that was never added is invisible to the
+   run.
 3. Create a temporary worktree from `HEAD`:
 
    ```bash
