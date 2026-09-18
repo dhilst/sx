@@ -1,8 +1,8 @@
-// Command sc measures a Go program as |AST| - the number of nodes it takes to
+// Command sx measures a Go program as |AST| - the number of nodes it takes to
 // express - and shrinks it without changing what it does.
 //
 // The measure has no parameters, ignores formatting and comments, and is
-// additive: a node costs one wherever it sits. "sc refactor" removes dead
+// additive: a node costs one wherever it sits. "sx refactor" removes dead
 // code, inlines abstractions used once, and factors out duplication, keeping
 // only the changes that survive a build, the tests of every package that could
 // be affected, and a re-count.
@@ -12,20 +12,21 @@ import (
 	"encoding/json"
 	"flag"
 	"fmt"
+	"go/build"
 	"io"
 	"io/fs"
 	"os"
 	"path/filepath"
-	"purgatrix/internal/refactor"
 	"strings"
+	"sx/internal/refactor"
 	"time"
 
-	"purgatrix/internal/cost"
+	"sx/internal/cost"
 )
 
 func main() {
 	if err := run(os.Args[1:], os.Stdout, os.Stderr); err != nil {
-		fmt.Fprintln(os.Stderr, "sc:", err)
+		fmt.Fprintln(os.Stderr, "sx:", err)
 		os.Exit(1)
 	}
 }
@@ -35,9 +36,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 		var args []string = args[1:]
 		fs := flag.NewFlagSet("refactor", flag.ContinueOnError)
 		fs.SetOutput(stderr)
+		var egPaths pathListFlag
 		apply := fs.Bool("apply", false, "write changes; without it, list what would be tried")
+		check := fs.Bool("check", false, "exit non-zero if a shrinking change can be proven; leaves the tree unchanged")
 		rounds := fs.Int("n", 10, "how many changes to attempt")
 		runTests := fs.Bool("test", true, "run the tests after each change and revert if they fail")
+		fs.Var(&egPaths, "eg", "file or directory of eg templates; repeat or separate with commas/path-list separators (empty disables eg)")
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
@@ -51,8 +55,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		deadcodePath, hasDeadcode := refactor.Tool("deadcode")
 		goplsPath, hasGopls := refactor.Tool("gopls")
-		if !hasDeadcode && !hasGopls {
-			return fmt.Errorf("install at least one of:\n  go install golang.org/x/tools/cmd/deadcode@latest\n  go install golang.org/x/tools/gopls@latest")
+		egPath, hasEg := refactor.Tool("eg")
+		egTemplates, err := refactor.EgTemplates(egPaths.Values([]string{"examples/eg", "sx/examples/eg"}))
+		if err != nil {
+			return err
+		}
+		if !hasDeadcode && !hasGopls && !(hasEg && len(egTemplates) > 0) {
+			return fmt.Errorf("install at least one of:\n  go install golang.org/x/tools/cmd/deadcode@latest\n  go install golang.org/x/tools/gopls@latest\n  go install golang.org/x/tools/cmd/eg@latest")
 		}
 		before, err := scoreTree(dir)
 		if err != nil {
@@ -64,6 +73,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		if !hasGopls {
 			fmt.Fprintln(stdout, "  (gopls not installed: calls will not be inlined)")
+		}
+		if len(egTemplates) > 0 && !hasEg {
+			fmt.Fprintln(stdout, "  (eg not installed: example rewrites will not be tried)")
 		}
 		// What a change can break is not what it touches. The gate is the
 		// package and everything that imports it, worked out once: these
@@ -93,6 +105,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 						all = append(all, cs...)
 					}
 				}
+				if hasEg && len(egTemplates) > 0 {
+					if cs, err := refactor.EgCandidates(egPath, dir, egTemplates); err == nil {
+						all = append(all, cs...)
+					}
+				}
 				best, found := refactor.Candidate{}, false
 				for _, c := range all {
 					if tried[c.Key()] || c.Predicted <= 0 {
@@ -110,7 +127,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 			}
 			attempted++
 			tried[c.Key()] = true
-			if !*apply {
+			if !*apply && !*check {
 				fmt.Fprintf(stdout, "\nwould %s %s at %s:%d, predicted -%d nodes\n    %s\n", c.Kind, c.Target, func() string {
 					if r, err := filepath.Rel(dir, c.File); err == nil {
 						return r
@@ -120,7 +137,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 				break
 			}
 			start := time.Now()
-			revert, err := refactor.Apply(dir, c, goplsPath)
+			revert, err := refactor.Apply(dir, c, goplsPath, egPath)
 			if err != nil {
 				fmt.Fprintf(stdout, "  %-2d %7s  skipped  %s %s  %v\n", attempted, round(time.Since(start)), c.Kind, c.Target, err)
 				continue
@@ -158,6 +175,13 @@ func run(args []string, stdout, stderr io.Writer) error {
 					return err
 				}
 			default:
+				if *check {
+					fmt.Fprintf(stdout, "  %-2d %7s  possible %s %s  %d -> %d (-%d, predicted -%d), tests pass\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted)
+					if err := revert(); err != nil {
+						return err
+					}
+					return fmt.Errorf("minimization possible: %s %s saves %d nodes", c.Kind, c.Target, before-after)
+				}
 				fmt.Fprintf(stdout, "  %-2d %7s  %-6s %-22s %d -> %d (-%d, predicted -%d), tests pass\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted)
 				before = after
 				applied++
@@ -166,7 +190,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fmt.Fprintf(stdout, "\n%d nodes after %d changes in %d attempts\n", before, applied, attempted)
 		return nil
 	}
-	fs := flag.NewFlagSet("sc", flag.ContinueOnError)
+	fs := flag.NewFlagSet("sx", flag.ContinueOnError)
 	fs.SetOutput(stderr)
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	limit := fs.Int("n", 20, "how many functions to list (0 for all)")
@@ -224,6 +248,9 @@ func goFiles(target string, includeTests bool) ([]string, error) {
 		return nil, err
 	}
 	if !info.IsDir() {
+		if !inCurrentBuild(target) {
+			return nil, nil
+		}
 		return []string{target}, nil
 	}
 	var out []string
@@ -243,6 +270,9 @@ func goFiles(target string, includeTests bool) ([]string, error) {
 		if !includeTests && strings.HasSuffix(path, "_test.go") {
 			return nil
 		}
+		if !inCurrentBuild(path) {
+			return nil
+		}
 		out = append(out, path)
 		return nil
 	})
@@ -255,4 +285,38 @@ func skipDir(name string) bool {
 		return true
 	}
 	return strings.HasPrefix(name, ".") || strings.HasPrefix(name, "_")
+}
+
+func inCurrentBuild(path string) bool {
+	ok, err := build.Default.MatchFile(filepath.Dir(path), filepath.Base(path))
+	return err == nil && ok
+}
+
+type pathListFlag struct {
+	set    bool
+	values []string
+}
+
+func (p *pathListFlag) String() string {
+	return strings.Join(p.values, string(os.PathListSeparator))
+}
+
+func (p *pathListFlag) Set(value string) error {
+	p.set = true
+	for _, part := range strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == rune(os.PathListSeparator)
+	}) {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			p.values = append(p.values, part)
+		}
+	}
+	return nil
+}
+
+func (p *pathListFlag) Values(defaults []string) []string {
+	if p.set {
+		return append([]string(nil), p.values...)
+	}
+	return append([]string(nil), defaults...)
 }

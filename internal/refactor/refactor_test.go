@@ -154,6 +154,69 @@ func TestDuplicateKeyIsStableUnderMovement(t *testing.T) {
 	if c.Key() == a.Key() {
 		t.Error("different kinds must not share a key")
 	}
+	egA := Candidate{Kind: KindEg, Template: "examples/eg/time-since.go", File: "x.go", Line: 10}
+	egB := Candidate{Kind: KindEg, Template: "examples/eg/time-since.go", File: "x.go", Line: 40}
+	if egA.Key() != egB.Key() {
+		t.Errorf("the same eg template got two keys: %q and %q", egA.Key(), egB.Key())
+	}
+}
+
+func TestParseEgMatches(t *testing.T) {
+	got, first, err := parseEgMatches("/repo", `=== /repo/a.go (2 matches)
+=== b.go (1 matches)
+`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != 3 {
+		t.Fatalf("matches = %d, want 3", got)
+	}
+	if first != "/repo/a.go" {
+		t.Fatalf("first file = %q, want /repo/a.go", first)
+	}
+}
+
+func TestEgTemplateDelta(t *testing.T) {
+	dir := write(t, "template.go", `//go:build ignore
+
+package template
+
+func before(s string) string { return s[:len(s)] }
+func after(s string) string  { return s }
+`)
+	delta, err := egTemplateDelta(filepath.Join(dir, "template.go"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if delta <= 0 {
+		t.Fatalf("template should shrink the expression, got delta %d", delta)
+	}
+}
+
+func TestEgTemplatesExpandsMultiplePaths(t *testing.T) {
+	root := t.TempDir()
+	one := filepath.Join(root, "one.go")
+	twoDir := filepath.Join(root, "rules")
+	two := filepath.Join(twoDir, "two.go")
+	if err := os.WriteFile(one, []byte("package template\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(twoDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(two, []byte("package template\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := EgTemplates([]string{one, twoDir, filepath.Join(root, "missing")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(got) != 2 {
+		t.Fatalf("templates = %v, want two files", got)
+	}
+	if got[0] != one || got[1] != two {
+		t.Fatalf("templates = %v, want sorted [%s %s]", got, one, two)
+	}
 }
 
 // An unused import is the one build failure worth repairing: nothing can

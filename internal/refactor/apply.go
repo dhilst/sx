@@ -2,6 +2,7 @@ package refactor
 
 import (
 	"bytes"
+	"errors"
 	"fmt"
 	"go/ast"
 	"go/format"
@@ -20,7 +21,7 @@ import (
 // Every change is made on the text, using positions the parser recorded, and
 // re-parsed before being written. A transformation that produces something Go
 // cannot read is a bug in the transformation, not a smaller program.
-func Apply(dir string, c Candidate, goplsPath string) (revert func() error, err error) {
+func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() error, err error) {
 	switch c.Kind {
 	case KindDead:
 		return removeDecl(c.File, c.Target)
@@ -322,7 +323,7 @@ func Apply(dir string, c Candidate, goplsPath string) (revert func() error, err 
 				if err != nil {
 					return 0, fmt.Errorf("replacing copies in %s left the file unparseable: %w", filepath.Base(path), func() error {
 						if s := firstLine(err.Error()); s != "" {
-							return fmt.Errorf("%s", s)
+							return errors.New(s)
 						}
 						return err
 					}())
@@ -344,6 +345,80 @@ func Apply(dir string, c Candidate, goplsPath string) (revert func() error, err 
 		}
 		_ = originals
 		_ = originals
+		return restore, nil
+	case KindEg:
+		if egPath == "" {
+			return nil, fmt.Errorf("eg is not installed")
+		}
+		if c.Template == "" {
+			return nil, fmt.Errorf("eg candidate has no template")
+		}
+		originals, restore, err := func() (map[string][]byte, func() error, error) {
+			files, err := goFilesIn(dir)
+			if err != nil {
+				return nil, nil, err
+			}
+			tests, err := testFilesIn(dir)
+			if err != nil {
+				return nil, nil, err
+			}
+			originals := map[string][]byte{}
+			for _, path := range append(files, tests...) {
+				b, err := os.ReadFile(path)
+				if err != nil {
+					return nil, nil, err
+				}
+				originals[path] = b
+			}
+			return originals, func() error {
+				for path, b := range originals {
+					if err := os.WriteFile(path, b, 0o644); err != nil {
+						return err
+					}
+				}
+				return nil
+			}, nil
+		}()
+		if err != nil {
+			return nil, err
+		}
+		cmd := exec.Command(egPath, "-w", "-t", c.Template, "./...")
+		cmd.Dir = dir
+		var stderr bytes.Buffer
+		cmd.Stderr = &stderr
+		if err := cmd.Run(); err != nil {
+			restore()
+			return nil, fmt.Errorf("eg declined %s: %s", filepath.Base(c.Template), firstLine(stderr.String()))
+		}
+		var changed []string
+		for path, before := range originals {
+			after, err := os.ReadFile(path)
+			if err != nil {
+				restore()
+				return nil, err
+			}
+			if !bytes.Equal(before, after) {
+				changed = append(changed, path)
+			}
+		}
+		if len(changed) == 0 {
+			restore()
+			return nil, fmt.Errorf("eg found no matches for %s", filepath.Base(c.Template))
+		}
+		for _, path := range changed {
+			if generated(path) {
+				restore()
+				return nil, fmt.Errorf("eg rewrote generated file %s", filepath.Base(path))
+			}
+			if !inCurrentBuild(path) {
+				restore()
+				return nil, fmt.Errorf("eg rewrote file outside this build: %s", filepath.Base(path))
+			}
+			if err := parses(path); err != nil {
+				restore()
+				return nil, fmt.Errorf("eg left %s unparseable: %w", filepath.Base(path), firstErr(err))
+			}
+		}
 		return restore, nil
 	default:
 		return nil, fmt.Errorf("no transformation for %q", c.Kind)
@@ -512,7 +587,7 @@ func callSite(path, name string) (string, bool, error) {
 // that says what actually went wrong.
 func firstErr(err error) error {
 	if s := firstLine(err.Error()); s != "" {
-		return fmt.Errorf("%s", s)
+		return errors.New(s)
 	}
 	return err
 }

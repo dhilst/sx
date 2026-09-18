@@ -38,4 +38,4 @@ jobs:
         run: go test ./... -count=1
 
       - name: score this repository
-        run: go run ./cmd/sc .
+        run: go run ./cmd/sx .

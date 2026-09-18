@@ -1,10 +1,57 @@
-# purgatrix
+# sx
 
 Negative pressure on the size of a Go codebase.
 
-Writing code adds to it; nothing takes anything away. This measures the size,
-finds what can be removed, removes it, and refuses to keep any change that does
-not make the program smaller or that stops it working.
+Large language models generate code quickly, and most development loops make it
+easier to add code than to remove it. `sx` pushes in the opposite direction: it
+measures Go code by AST size, finds transformations that may reduce that size,
+applies them, and keeps only changes that make the program smaller while still
+building and passing tests.
+
+The objective is deliberately narrow. `sx` optimizes for fewer AST nodes, not
+for readability. It may prefer longer functions, fewer helper functions, and
+inlining that a human reviewer would reject. Treat its output as a patch to
+review, not as a formatter.
+
+## Quick Start
+
+Install the external tools used for transformations:
+
+```bash
+go install golang.org/x/tools/cmd/deadcode@latest
+go install golang.org/x/tools/gopls@latest
+go install golang.org/x/tools/cmd/eg@latest
+```
+
+Measure a module:
+
+```bash
+go run ./cmd/sx .
+```
+
+Preview one shrinking candidate:
+
+```bash
+go run ./cmd/sx refactor .
+```
+
+Apply candidates and keep only changes that pass the gates:
+
+```bash
+go run ./cmd/sx refactor -apply -n 30 .
+```
+
+Run the tests after the pass:
+
+```bash
+go test ./...
+```
+
+Inspect the patch before committing:
+
+```bash
+git diff
+```
 
 ## The measure
 
@@ -18,20 +65,23 @@ validate against anyone's judgement. It is also additive — a node costs one
 wherever it sits — which is what makes it usable as a target rather than only as
 a ranking.
 
+Command form:
+
 ```bash
-go run ./cmd/sc [-json] [-n 20] [-tests] <paths...>
+go run ./cmd/sx [-json] [-n 20] [-tests] <paths...>
 ```
 
 ## The transformations
 
 The objective is `min |AST|` subject to behaviour: the same outputs and side
-effects for the same inputs and state. Three things remove nodes.
+effects for the same inputs and state. Four things remove nodes.
 
 | primitive | what it exploits | measured on this repository |
 |---|---|---|
 | **dead code** | a declaration nothing can reach | −41 in one move, the largest single win |
 | **duplication** | the same code written more than once | −39 in one move |
 | **inlining** | a function that only forwards | 17 moves, −2 to −27 each |
+| **example rewrites** | a larger expression with an equivalent smaller one | whatever the checked-in `eg` templates match |
 
 Detection is this tool's job. The transformations are not, wherever a maintained
 tool already does one properly:
@@ -40,16 +90,118 @@ tool already does one properly:
   time syntactic pass cannot.
 - **`gopls`** inlines a call and extracts a function using type information —
   free variables, return values, and whether the change is legal at all.
+- **`eg`** applies example-based expression rewrites from `examples/eg`.
 
 ```bash
 go install golang.org/x/tools/cmd/deadcode@latest
 go install golang.org/x/tools/gopls@latest
+go install golang.org/x/tools/cmd/eg@latest
 
-go run ./cmd/sc refactor [-apply] [-n 30] <dir>
+go run ./cmd/sx refactor [-apply] [-check] [-n 30] [-eg examples/eg] <dir>
 ```
 
-Neither tool has any notion of which change is worth making. That is what the
+None of these tools has any notion of which change is worth making. That is what the
 measure supplies.
+
+### Example rewrites
+
+`eg` templates are Go files with a `before` function and an `after` function.
+Both functions must have the same type. `sx` asks `eg` where a template matches,
+estimates the AST saving, applies the template only when selected, and then runs
+the same build, test and measurement gates used for every other change.
+
+Default template search paths:
+
+```text
+examples/eg
+sx/examples/eg
+```
+
+Pass your own templates with `-eg`. The flag may be repeated, and each value may
+contain comma-separated paths or paths separated by the operating system path-list
+separator.
+
+```bash
+go run ./cmd/sx refactor -apply -eg ./my-eg-rules -eg ./team/rules/time.go .
+go run ./cmd/sx refactor -apply -eg ./my-eg-rules,./team/rules .
+```
+
+Disable example rewrites:
+
+```bash
+go run ./cmd/sx refactor -apply -eg "" .
+```
+
+The checked-in examples cover small expression reductions such as:
+
+```text
+fmt.Errorf("%s", s)       -> errors.New(s)
+fmt.Sprintf("%s", s)      -> s
+time.Now().Sub(t)         -> time.Since(t)
+s[:len(s)]                -> s
+x == true                 -> x
+x != false                -> x
+!!x                       -> x
+bytes.Compare(a, b) == 0  -> bytes.Equal(a, b)
+strings.Index(s, sub)>=0  -> strings.Contains(s, sub)
+strings.Index(s, sub)==-1 -> !strings.Contains(s, sub)
+```
+
+### CI mode
+
+Use `-check` to fail a build when `sx` can prove that at least one shrinking
+change is available. Check mode applies candidates in the working tree, runs the
+same gates, reverts the successful candidate, and exits non-zero when a
+size-reducing patch is possible.
+
+```bash
+go run ./cmd/sx refactor -check -n 30 .
+```
+
+GitHub Actions example:
+
+```yaml
+name: sx
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+jobs:
+  minimize:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go install golang.org/x/tools/cmd/deadcode@latest
+      - run: go install golang.org/x/tools/gopls@latest
+      - run: go install golang.org/x/tools/cmd/eg@latest
+      - run: go run ./cmd/sx refactor -check -n 30 .
+```
+
+### Assistant commands
+
+This repository includes project instructions for Codex and Claude:
+
+```text
+.codex/skills/sx/SKILL.md
+.claude/commands/sx/min.md
+.claude/commands/sx/bake.md
+```
+
+`/sx:min [all|auto]` runs minimization in a temporary git worktree and then
+reviews the resulting patch.
+
+- `all` accepts every change that passes `sx` gates.
+- `auto` lets the model reject changes that reduce AST size but make the code
+  harder to maintain.
+
+`/sx:bake [path]` asks the model to create new `eg` examples from expression
+patterns in the codebase. If `path` is omitted, it writes to `sx/examples/eg`.
+That path is searched by default by later minimization runs.
 
 ## Nothing is kept on trust
 

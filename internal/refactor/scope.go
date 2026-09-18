@@ -2,7 +2,7 @@ package refactor
 
 import (
 	"bytes"
-	"fmt"
+	"errors"
 	"os/exec"
 	"strings"
 )
@@ -79,7 +79,7 @@ func (s Scope) Test() error {
 	cmd.Stderr = &stderr
 	if err := cmd.Run(); err != nil {
 		if line := firstLine(stderr.String()); line != "" {
-			return fmt.Errorf("%s", line)
+			return errors.New(line)
 		}
 		return err
 	}

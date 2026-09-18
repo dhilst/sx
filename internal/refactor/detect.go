@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"purgatrix/internal/cost"
+	"sx/internal/cost"
 )
 
 // Kind names what a candidate proposes.
@@ -38,6 +38,8 @@ const (
 	// KindDuplicate factors repeated code into one function called from each
 	// place the code used to be.
 	KindDuplicate Kind = "dedup"
+	// KindEg applies one example-based expression rewrite.
+	KindEg Kind = "eg"
 )
 
 // Candidate is one change worth attempting, with what the measure says it
@@ -57,6 +59,8 @@ type Candidate struct {
 	// Hash identifies the repeated run, so the remaining copies can be found
 	// again after the first has been extracted and everything below it moved.
 	Hash string `json:"-"`
+	// Template is the eg rewrite template used for an example-based change.
+	Template string `json:"template,omitempty"`
 }
 
 // Key identifies a candidate, so a caller can remember which it has tried.
@@ -75,6 +79,8 @@ func (c Candidate) Key() string {
 		// rejected came back: three of them were retried three times each in a
 		// single pass, at three and a half seconds a go.
 		return fmt.Sprintf("%s:%s:%s", c.Kind, filepath.Dir(c.File), c.Target)
+	case KindEg:
+		return fmt.Sprintf("%s:%s", c.Kind, c.Template)
 	}
 	return fmt.Sprintf("%s:%s:%d:%d", c.Kind, c.File, c.Line, c.Col)
 }

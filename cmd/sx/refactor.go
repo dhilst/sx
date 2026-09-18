@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"purgatrix/internal/cost"
+	"sx/internal/cost"
 )
 
 func scoreTree(dir string) (int, error) {
