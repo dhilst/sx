@@ -39,8 +39,8 @@ lines.
 
 **A wrong drop.** milvus's tracer test fails on its own. Bisection ran the
 tests through Go's test cache, so the "good" commit's pass was a replay of
-the baseline, and an innocent deduplication was blamed. Bisection has to run
-fresh, as the recheck already does; that is the first thing to fix.
+the baseline, and an innocent deduplication was blamed. Bisection now runs
+every step fresh (`-count=1`), as the recheck already did.
 
 Every kept change landed on the model's prediction: across all runs, one
 prediction in a hundred was off, and that was before the comment-counting fix.
@@ -157,5 +157,5 @@ runs instead of fourteen.
    found 'case'"); worth reporting upstream.
 6. The batch regression test failed once in about twenty runs and was not
    reproduced; it needs a look.
-7. **Bisect without the test cache** (`-count=1`), or a flaky test sends it to
-   an innocent commit - it did on milvus.
+7. ~~Bisect without the test cache~~: done after the runs; every bisection
+   step now runs with `-count=1`.

@@ -40,8 +40,12 @@ func verifyBatch(stdout io.Writer, hist *refactor.History, scope refactor.Scope,
 			return "", nil, nil
 		}
 		fmt.Fprintf(stdout, "  tests fail with the changes (%v); bisecting %d commits\n", why, len(commits))
+		// Every bisection step runs fresh. Through Go's test cache an
+		// unchanged package answers with the result recorded at the start:
+		// on milvus a test that had begun failing on its own looked like a
+		// pass on the "good" side, and an innocent change was dropped.
 		bad, err := hist.Bisect(commits, func() bool {
-			_, why := failing(false)
+			_, why := failing(true)
 			return why != nil
 		})
 		if err != nil {
