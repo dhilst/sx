@@ -159,6 +159,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}()
 
 		tried := map[string]bool{}
+		unstable := map[string]int{} // package -> rechecks it failed on its own
 		applied, attempted := 0, 0
 		// One cache for the run: a package is re-read only when it, or what it
 		// imports, changed since the last pass.
@@ -311,11 +312,28 @@ func run(args []string, stdout, stderr io.Writer) error {
 						}
 					}
 					var joined []string
+					flaked := map[string]bool{}
 					for k := range again {
 						if !baseline[k] {
 							baseline[k] = true
 							pkg, test, _ := strings.Cut(k, "\x00")
 							joined = append(joined, strings.TrimSpace(pkg+" "+test))
+							flaked[pkg] = true
+						}
+					}
+					// A package that fails on its own at two separate
+					// rechecks is not flaky in one test but in its order or
+					// shared state: milvus's paramtable failed a different
+					// test each run. Skipping tests one by one never ends
+					// there, so the package leaves the gate.
+					for pkg := range flaked {
+						if pkg == "" {
+							continue
+						}
+						unstable[pkg]++
+						if unstable[pkg] == 2 {
+							scope = scope.Without(pkg)
+							fmt.Fprintf(stdout, "      (%s fails on its own at every recheck; no longer gating)\n", pkg)
 						}
 					}
 					if len(joined) > 0 {

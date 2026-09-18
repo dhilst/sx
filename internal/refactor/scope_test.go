@@ -149,3 +149,26 @@ func TestFailuresSeparatesBaselineFromNewFailures(t *testing.T) {
 		t.Fatalf("a change broke TestF, but the gate said %v", err)
 	}
 }
+
+// A package that fails on its own leaves the gate; the rest of a ./... scope
+// stays.
+func TestWithoutDropsOnePackage(t *testing.T) {
+	root := t.TempDir()
+	for name, src := range map[string]string{
+		"go.mod":        "module m\n\ngo 1.25\n",
+		"stable/s.go":   "package stable\n",
+		"unstable/u.go": "package unstable\n",
+	} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	got := TestScope(root).Without("m/unstable").Packages()
+	if !slices.Equal(got, []string{"m/stable"}) {
+		t.Fatalf("scope = %v, want [m/stable]", got)
+	}
+}

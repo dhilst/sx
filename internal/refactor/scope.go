@@ -75,6 +75,29 @@ func TestScope(dir string) Scope {
 	return Scope{root: root, pkgs: pkgs, targets: len(targets)}
 }
 
+// Without is the scope less one package. A scope of ./... is spelled out
+// first, since go test cannot exclude a package from a pattern.
+func (s Scope) Without(pkg string) Scope {
+	pkgs := s.pkgs
+	if len(pkgs) == 1 && pkgs[0] == "./..." {
+		if out, err := goList(s.root, "-e", "-f", "{{.ImportPath}}", "./..."); err == nil {
+			pkgs = strings.Fields(out)
+		}
+	}
+	var kept []string
+	targets := s.targets
+	for i, p := range pkgs {
+		if p == pkg {
+			if i < s.targets {
+				targets--
+			}
+			continue
+		}
+		kept = append(kept, p)
+	}
+	return Scope{root: s.root, pkgs: kept, targets: targets}
+}
+
 // Targets is how many of the scope's packages are under the directory; the
 // rest import them.
 func (s Scope) Targets() int { return s.targets }
