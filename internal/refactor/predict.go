@@ -994,7 +994,32 @@ func copiesAgree(tp *typedPackage, occ []Occurrence) error {
 		return out
 	}
 	want := needs(occ[0], first)
+	// A return inside the run is carried out by the caller, with plumbing
+	// built from the first copy's enclosing function; at another copy it
+	// has to return the same types.
+	returns := false
+	for _, s := range occ[0].stmts {
+		ast.Inspect(s, func(n ast.Node) bool {
+			switch n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.ReturnStmt:
+				returns = true
+			}
+			return !returns
+		})
+	}
+	var firstSig *types.Signature
+	if returns {
+		firstSig = enclosingSignature(tp, occ[0])
+	}
 	for _, o := range occ[1:] {
+		if returns {
+			sig := enclosingSignature(tp, o)
+			if firstSig == nil || sig == nil || !types.Identical(firstSig.Results(), sig.Results()) {
+				return fmt.Errorf("the copies return from functions with different results")
+			}
+		}
 		other := idents(o.stmts)
 		if len(other) != len(first) {
 			return fmt.Errorf("the copies differ in shape")
@@ -1059,4 +1084,28 @@ func frameBound(info *types.Info, stmts []ast.Stmt) string {
 		})
 	}
 	return what
+}
+
+// enclosingSignature is the type of the innermost function, declared or
+// literal, that the occurrence sits in.
+func enclosingSignature(tp *typedPackage, o Occurrence) *types.Signature {
+	pos := o.stmts[0].Pos()
+	var ft *ast.FuncType
+	ast.Inspect(o.file, func(n ast.Node) bool {
+		if n == nil || !(n.Pos() <= pos && pos < n.End()) {
+			return false
+		}
+		switch f := n.(type) {
+		case *ast.FuncDecl:
+			ft = f.Type
+		case *ast.FuncLit:
+			ft = f.Type
+		}
+		return true
+	})
+	if ft == nil {
+		return nil
+	}
+	sig, _ := tp.info.TypeOf(ft).(*types.Signature)
+	return sig
 }
