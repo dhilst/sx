@@ -1,13 +1,30 @@
 # sx
 
-`sx` helps you make a Go codebase smaller.
+`sx` helps you shrink a Go module safely enough to use as a code-review aid.
 
-It counts Go AST nodes, looks for changes that should reduce that count, applies
-one change at a time, and keeps only the changes that still build, pass tests,
-and actually make the program smaller.
+It measures Go code by counting AST nodes, finds changes that should lower that
+count, tries one change at a time, and keeps only changes that still build, pass
+tests, and make the measured program smaller.
 
-Use it as a patch generator, not as a formatter. `sx` optimizes for size, so you
-should still review the diff and reject changes that hurt clarity.
+Use `sx` as a patch generator, not as an automatic cleanup tool. It optimizes
+for small code, so you should review every diff and keep only the changes that
+also make the code easier to maintain.
+
+## Who This Is For
+
+Use `sx` when you want to:
+
+- find the largest functions in a Go package or module
+- remove unreachable functions detected by `deadcode`
+- inline one-use helpers through `gopls`
+- factor repeated code when doing so reduces AST size
+- apply small, example-based expression rewrites with `eg`
+- fail CI when a shrinking candidate is available
+
+Do **not** treat `sx` as proof that a change is behavior-preserving. The build,
+test, and measurement gates catch many bad rewrites, but public APIs,
+timing-sensitive code, exact error values, reflection, and side effects still
+need human review.
 
 ## Install
 
@@ -17,13 +34,13 @@ In the Go module you want to shrink, add `sx` as a tool dependency:
 go get -tool github.com/dhilst/sx/cmd/sx
 ```
 
-That pins the version in `go.mod` and lets you run:
+Then run it with:
 
 ```bash
 go tool sx .
 ```
 
-Install the helper tools used for refactoring:
+Install the helper tools for refactoring candidates:
 
 ```bash
 go install golang.org/x/tools/cmd/deadcode@latest
@@ -31,69 +48,118 @@ go install golang.org/x/tools/gopls@latest
 go install golang.org/x/tools/cmd/eg@latest
 ```
 
+You do not need every helper installed, but each missing helper disables one
+class of candidate. If no usable helper is available, `sx refactor` exits with
+an install message. `eg` counts as usable only when at least one template exists.
+
 Inside this repository, `go tool sx` and `go run ./cmd/sx` build the same local
 program.
 
 ## Quick Start
 
-Measure the current module:
+Start with a clean git working tree so rejected or unwanted patches are easy to
+inspect and undo.
+
+### 1. Measure the current module
 
 ```bash
 go tool sx .
 ```
 
-Preview the best candidate without editing files:
+This prints the total node count and the largest functions.
+
+### 2. Preview one candidate without editing files
 
 ```bash
 go tool sx refactor .
 ```
 
-Apply up to 30 candidates, keeping only changes that pass the gates:
+Without `-apply`, `sx refactor` only reports the best candidate it would try.
+
+### 3. Apply a bounded pass
 
 ```bash
 go tool sx refactor -apply -n 30 .
 ```
 
-Review the result:
+For each attempted change, `sx` formats and repairs imports, rebuilds, runs the
+relevant tests, re-counts nodes, and reverts the change unless the final count is
+smaller.
+
+### 4. Review before committing
 
 ```bash
 go test ./...
 git diff
 ```
 
-Use `-check` in CI to fail when `sx` can see at least one likely shrinking
-candidate:
+Keep the patch only if it is smaller **and** clearer for future maintainers.
+
+## Typical Workflows
+
+### Local minimization pass
+
+```bash
+git status --short
+go tool sx refactor -apply -n 30 .
+go test ./...
+git diff
+```
+
+If the diff is too aggressive, discard it and run fewer attempts:
+
+```bash
+git restore .
+go tool sx refactor -apply -n 5 .
+```
+
+### CI check
+
+Use `-check` to fail when `sx` can see at least one likely shrinking candidate.
+It never writes files.
 
 ```bash
 go tool sx refactor -check -n 30 .
 ```
 
+A `-check` candidate is only a prediction. The same candidate may be rejected by
+`-apply` after the real build, test, and measurement gates run.
+
+### Disable tests for a fast exploratory run
+
+```bash
+go tool sx refactor -apply -test=false -n 30 .
+```
+
+Use this only for exploration. Run the full test suite before keeping the patch.
+
 ## What sx Changes
 
-`sx` looks for four kinds of reduction.
+`sx` currently looks for four kinds of reduction.
 
-| Kind | Example |
-|---|---|
-| Dead code | remove functions or declarations that nothing reaches |
-| Inlining | replace a tiny one-use helper with its body |
-| Duplication | extract repeated code when doing so reduces AST size |
-| `eg` examples | rewrite one expression shape into a smaller equivalent shape |
+| Kind | Helper | What it tries |
+|---|---|---|
+| Dead code | `deadcode` | Remove unreachable plain functions |
+| Inlining | `gopls` | Inline small functions used once |
+| Duplication | `gopls` | Extract repeated code when the extraction is smaller |
+| `eg` examples | `eg` | Rewrite expressions using example templates |
 
-Every attempted change goes through the same loop:
+Every attempted change follows this loop:
 
-1. apply the candidate
-2. run formatting and import repair
-3. rebuild
-4. run the relevant tests
-5. count AST nodes again
-6. keep the change only if the node count went down
+1. choose the highest predicted saving not already tried
+2. apply the candidate
+3. format and repair imports
+4. rebuild the package
+5. run the packages that could be affected
+6. count AST nodes again
+7. keep the change only if the count went down
 
-The predicted saving is only used to choose what to try first. The final count is
-what decides whether the patch stays.
+The predicted saving only decides what to try first. The final measured count is
+what decides whether the change stays.
 
 ## Code Reduction Examples
 
-These are the kind of expression reductions included in `examples/eg`.
+These are examples of the small expression rewrites included in `examples/eg`.
 
 ```go
 // before
@@ -139,7 +205,7 @@ return enabled == true
 return enabled
 ```
 
-The checked-in examples currently cover:
+Checked-in templates currently cover:
 
 ```text
 fmt.Errorf("%s", s)       -> errors.New(s)
@@ -154,26 +220,35 @@ strings.Index(s, sub)>=0  -> strings.Contains(s, sub)
 strings.Index(s, sub)==-1 -> !strings.Contains(s, sub)
 ```
 
-## Using eg Examples
+## Add Your Own `eg` Rewrites
 
 `eg` is the Go example-based refactoring tool from `golang.org/x/tools`. An
 `eg` template is a Go file with a `before` function and an `after` function.
 Both functions must have the same type.
 
-Example template:
+### Minimal template
 
 ```go
 //go:build ignore
 
 package template
 
-import "strings"
-
-func before(s, sub string) bool { return strings.Index(s, sub) >= 0 }
-func after(s, sub string) bool  { return strings.Contains(s, sub) }
+func before(s string) string { return s[:len(s)] }
+func after(s string) string  { return s }
 ```
 
-Save templates in a directory and pass that directory to `sx`:
+To copy this into your own module:
+
+```bash
+mkdir -p sx/examples/eg
+$EDITOR sx/examples/eg/full-string-slice.go
+go tool sx refactor -check -eg sx/examples/eg .
+go tool sx refactor -apply -eg sx/examples/eg .
+go test ./...
+git diff
+```
+
+You can also pass any template directory to `sx`:
 
 ```bash
 go tool sx refactor -check -eg ./examples/eg .
@@ -198,62 +273,21 @@ Disable `eg` rewrites by passing an empty `-eg` value:
 go tool sx refactor -apply -eg "" .
 ```
 
-By default, `sx` searches these directories:
+By default, `sx` searches these directories if they exist:
 
 ```text
 examples/eg
 sx/examples/eg
 ```
 
-## Tutorial: Add eg Examples to Your Codebase
+### Template-writing checklist
 
-This is a small end-to-end example you can copy into your own Go module.
-
-1. Create a rule directory:
-
-   ```bash
-   mkdir -p sx/examples/eg
-   ```
-
-2. Add one file per rewrite. For example, create
-   `sx/examples/eg/full-string-slice.go`:
-
-   ```go
-   //go:build ignore
-
-   package template
-
-   func before(s string) string { return s[:len(s)] }
-   func after(s string) string  { return s }
-   ```
-
-3. Check whether the rule finds a shrinking candidate:
-
-   ```bash
-   go tool sx refactor -check -eg sx/examples/eg .
-   ```
-
-4. Apply it behind the normal build, test, and measurement gates:
-
-   ```bash
-   go tool sx refactor -apply -eg sx/examples/eg .
-   ```
-
-5. Review the patch:
-
-   ```bash
-   go test ./...
-   git diff
-   ```
-
-When writing your own rules:
-
-- keep `before` and `after` the same type
-- prefer a single returned expression in each function
-- add imports normally when the expressions need them
-- use `//go:build ignore` so templates are not compiled into your module
-- avoid rules that duplicate, remove, or reorder expressions with side effects
-- start with narrow, obvious rewrites and let `sx` prove the measured saving
+- Keep `before` and `after` the same type.
+- Prefer one returned expression in each function.
+- Add imports normally when the expressions need them.
+- Use `//go:build ignore` so templates are not compiled into your module.
+- Avoid rules that duplicate, remove, or reorder expressions with side effects.
+- Start with narrow, obvious rewrites and let `sx` prove the measured saving.
 
 ## Command Reference
 
@@ -266,20 +300,21 @@ go tool sx [-json] [-n 20] [-tests] <paths...>
 Refactor a module:
 
 ```bash
-go tool sx refactor [-apply] [-check] [-n 30] [-test=false] [-eg path] <dir>
+go tool sx refactor [-apply] [-check] [-n 10] [-test=false] [-eg path] <dir>
 ```
 
 Useful flags:
 
-| Flag | Meaning |
-|---|---|
-| `-apply` | write changes; without it, only preview one candidate |
-| `-check` | fail when a shrinking candidate is found; never writes files |
-| `-n` | number of candidates to attempt |
-| `-test=false` | skip tests after each accepted-looking change |
-| `-eg` | file or directory of `eg` templates |
-| `-json` | emit measurement output as JSON |
-| `-tests` | include `_test.go` files when measuring |
+| Flag | Command | Meaning |
+|---|---|---|
+| `-json` | measure | Emit measurement output as JSON |
+| `-n` | measure | Number of functions to list; `0` lists all |
+| `-tests` | measure | Include `_test.go` files when measuring |
+| `-apply` | refactor | Write accepted changes; without it, preview one candidate |
+| `-check` | refactor | Exit non-zero when a shrinking candidate is found; never writes files |
+| `-n` | refactor | Number of candidates to attempt; default is `10` |
+| `-test=false` | refactor | Skip tests after each accepted-looking change |
+| `-eg` | refactor | File or directory of `eg` templates; repeatable |
 
 ## CI Example
 
@@ -305,6 +340,34 @@ jobs:
       - run: go tool sx refactor -check -n 30 .
 ```
 
+## Troubleshooting
+
+| Symptom | What to do |
+|---|---|
+| `sx refactor` says helper tools are missing | Install at least one of `deadcode`, `gopls`, or `eg` |
+| `eg` templates are ignored | Confirm `eg` is installed and templates are in a searched path or passed with `-eg` |
+| A candidate appears in `-check` but is not kept by `-apply` | This is expected when the real gates reject the change or the measured count does not improve |
+| The diff is too broad | Restore the tree and rerun with a smaller `-n` |
+| A rewrite looks smaller but less readable | Reject it; `sx` optimizes for AST size, not taste |
+
+## Adversarial User Review
+
+A skeptical user should challenge `sx` before trusting its output:
+
+- **"Will this silently rewrite my whole repository?"** No. Preview mode is the
+  default. `sx` writes files only with `-apply`, and rejected changes are
+  reverted.
+- **"Can it prove the rewrite is correct?"** No. It builds, tests, and measures;
+  it does not prove semantic equivalence.
+- **"Why should I trust the predicted savings?"** You should not trust them as
+  final results. They only rank candidates. Kept patches must produce a smaller
+  measured AST after the rewrite.
+- **"What if smaller code is worse code?"** Then reject the diff. The tool is
+  useful when it finds simplifications, not when it wins a code-golf contest.
+- **"What should I review most carefully?"** Public APIs, error text and error
+  wrapping, reflection, concurrency, timing, generated code boundaries, and
+  expressions with side effects.
+
 ## Assistant Support
 
 This repository includes instructions for coding assistants:
@@ -321,17 +384,6 @@ the resulting patch.
 `/sx:bake [path]` asks the assistant to create new `eg` examples from expression
 patterns in the codebase. If `path` is omitted, it writes to `sx/examples/eg`,
 which `sx` searches by default.
-
-## Safety Notes
-
-`sx` tries to preserve behavior by building, testing, and measuring after every
-change. It is still not a proof of semantic equivalence. Review the diff before
-committing, especially around public APIs, timing-sensitive code, error values,
-and code with side effects.
-
-`-check` is intentionally conservative for CI. It reports a predicted candidate
-without editing the tree. A candidate reported by `-check` may later be rejected
-by `-apply` after the real build, test, and measurement gates run.
 
 ## License
 
