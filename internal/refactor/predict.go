@@ -1090,22 +1090,23 @@ func frameBound(info *types.Info, stmts []ast.Stmt) string {
 // literal, that the occurrence sits in.
 func enclosingSignature(tp *typedPackage, o Occurrence) *types.Signature {
 	pos := o.stmts[0].Pos()
-	var ft *ast.FuncType
+	var t types.Type
 	ast.Inspect(o.file, func(n ast.Node) bool {
 		if n == nil || !(n.Pos() <= pos && pos < n.End()) {
 			return false
 		}
 		switch f := n.(type) {
 		case *ast.FuncDecl:
-			ft = f.Type
+			// A declaration's type is its object's; the checker does not
+			// record one for the FuncType syntax.
+			if obj := tp.info.Defs[f.Name]; obj != nil {
+				t = obj.Type()
+			}
 		case *ast.FuncLit:
-			ft = f.Type
+			t = tp.info.TypeOf(f)
 		}
 		return true
 	})
-	if ft == nil {
-		return nil
-	}
-	sig, _ := tp.info.TypeOf(ft).(*types.Signature)
+	sig, _ := t.(*types.Signature)
 	return sig
 }
