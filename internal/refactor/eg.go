@@ -56,14 +56,9 @@ func EgTemplates(paths []string) ([]string, error) {
 	return out, nil
 }
 
-// EgCandidates finds the templates that match this tree and has the model
+// Eg finds the templates that match the tree under dir and has the model
 // price each one over every match. eg itself runs only when a candidate is
 // applied.
-func EgCandidates(egPath, dir string, templates []string) ([]Candidate, error) {
-	return NewCache().Eg(dir, templates)
-}
-
-// Eg is EgCandidates reusing what the cache already knows.
 func (c *Cache) Eg(dir string, templates []string) ([]Candidate, error) {
 	all, err := c.egRewrites(dir, templates)
 	if err != nil {

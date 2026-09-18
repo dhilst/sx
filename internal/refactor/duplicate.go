@@ -331,34 +331,28 @@ func stmtDigest(s ast.Stmt) [sha256.Size]byte {
 		if n == nil {
 			return false
 		}
-		writeNode(h, n)
+		// The node's type and its own non-node fields. Positions are left
+		// out, except a variadic call's ..., which changes what it means.
+		v := reflect.ValueOf(n).Elem()
+		t := v.Type()
+		io.WriteString(h, t.Name())
+		for i := 0; i < t.NumField(); i++ {
+			f, fv := t.Field(i), v.Field(i)
+			switch {
+			case f.Type == reflect.TypeOf(token.NoPos):
+				if call, ok := n.(*ast.CallExpr); ok && f.Name == "Ellipsis" {
+					fmt.Fprintf(h, "|...=%t", call.Ellipsis.IsValid())
+				}
+			case fv.Kind() == reflect.String, fv.Kind() == reflect.Bool, fv.Kind() == reflect.Int:
+				fmt.Fprintf(h, "|%s=%v", f.Name, fv.Interface())
+			}
+		}
+		io.WriteString(h, ";")
 		return true
 	})
 	var d [sha256.Size]byte
 	copy(d[:], h.Sum(nil))
 	return d
-}
-
-var posType = reflect.TypeOf(token.NoPos)
-
-// writeNode writes a node's type and its own non-node fields. Positions are
-// left out, except a variadic call's ..., which changes what the call means.
-func writeNode(w io.Writer, n ast.Node) {
-	v := reflect.ValueOf(n).Elem()
-	t := v.Type()
-	io.WriteString(w, t.Name())
-	for i := 0; i < t.NumField(); i++ {
-		f, fv := t.Field(i), v.Field(i)
-		switch {
-		case f.Type == posType:
-			if call, ok := n.(*ast.CallExpr); ok && f.Name == "Ellipsis" {
-				fmt.Fprintf(w, "|...=%t", call.Ellipsis.IsValid())
-			}
-		case fv.Kind() == reflect.String, fv.Kind() == reflect.Bool, fv.Kind() == reflect.Int:
-			fmt.Fprintf(w, "|%s=%v", f.Name, fv.Interface())
-		}
-	}
-	io.WriteString(w, ";")
 }
 
 // runDigest identifies a run of statements by theirs.

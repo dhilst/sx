@@ -581,7 +581,14 @@ x != false                -> x
 bytes.Compare(a, b) == 0  -> bytes.Equal(a, b)
 strings.Index(s, sub)>=0  -> strings.Contains(s, sub)
 strings.Index(s, sub)==-1 -> !strings.Contains(s, sub)
+len(s) == 0               -> s == ""              (s a string)
+len(s) > 0, len(s) != 0   -> s != ""              (s a string)
+fmt.Sprintf("%d", n)      -> strconv.Itoa(n)      (n an int)
+strconv.FormatInt(int64(n), 10) -> strconv.Itoa(n) (n an int)
 ```
+
+The last four were found by `/sx bake` in cc-connect, flowstate, and milvus,
+where they matched 73 times.
 
 ## Add Your Own `eg` Rewrites
 
