@@ -55,6 +55,28 @@ an install message. `eg` counts as usable only when at least one template exists
 Inside this repository, `go tool sx` and `go run ./cmd/sx` build the same local
 program.
 
+## Helper Tools
+
+`sx` decides which changes are worth trying, but it delegates the actual Go-aware
+work to maintained Go tools:
+
+| Tool | Link | Used for |
+|---|---|---|
+| `deadcode` | [golang.org/x/tools/cmd/deadcode](https://pkg.go.dev/golang.org/x/tools/cmd/deadcode) | Finding unreachable functions that can be deleted |
+| `gopls` | [golang.org/x/tools/gopls](https://pkg.go.dev/golang.org/x/tools/gopls) | Inlining calls, extracting duplicated statement runs, and repairing imports |
+| `eg` | [golang.org/x/tools/cmd/eg](https://pkg.go.dev/golang.org/x/tools/cmd/eg) | Applying example-based expression rewrites from template files |
+
+The tools are optional in the sense that `sx` can run with only the helpers you
+have installed. Missing helpers simply remove candidate classes:
+
+- without `deadcode`, unreachable functions are not proposed
+- without `gopls`, inline and deduplication candidates are not proposed
+- without `eg`, example rewrite templates are not applied
+
+At least one candidate source must be available. For `eg`, that means both the
+`eg` binary and at least one template under `examples/eg`, `sx/examples/eg`, or
+a path passed with `-eg`.
+
 ## Quick Start
 
 Start with a clean git working tree so rejected or unwanted patches are easy to
@@ -141,8 +163,37 @@ Use this only for exploration. Run the full test suite before keeping the patch.
 |---|---|---|
 | Dead code | `deadcode` | Remove unreachable plain functions |
 | Inlining | `gopls` | Inline small functions used once |
-| Duplication | `gopls` | Extract repeated code when the extraction is smaller |
+| Deduplication | `gopls` | Extract repeated statement runs when the extraction is smaller |
 | `eg` examples | `eg` | Rewrite expressions using example templates |
+
+### Dead Code
+
+`sx` asks `deadcode` which plain functions are unreachable from the current
+program. It then tries deleting one candidate at a time and keeps the deletion
+only if the build, tests, and measured AST count all pass.
+
+### Inlining
+
+`sx` finds small functions that appear to be used once, then asks `gopls` to run
+the actual inline refactor. `gopls` owns the type-aware edit; `sx` owns the
+decision about whether the resulting patch is smaller and still valid.
+
+### Deduplication
+
+`sx` looks for repeated statement runs in a package. When extracting the repeated
+run into a helper function should reduce AST size, `sx` asks `gopls` to perform
+the extraction and then replaces the other copies with calls when that remains
+buildable and smaller.
+
+This is deliberately conservative. It does not try to invent arbitrary
+abstractions; it only attempts repeated code that can be represented as a normal
+Go extraction and accepted by the same build, test, and measurement gates.
+
+### `eg` Rewrites
+
+`sx` loads `eg` templates from configured directories, prices the AST difference
+between each template's `before` and `after` expressions, asks `eg` where the
+template matches, and applies the rewrite only when it is selected as a candidate.
 
 Every attempted change follows this loop:
 
@@ -222,9 +273,10 @@ strings.Index(s, sub)==-1 -> !strings.Contains(s, sub)
 
 ## Add Your Own `eg` Rewrites
 
-`eg` is the Go example-based refactoring tool from `golang.org/x/tools`. An
-`eg` template is a Go file with a `before` function and an `after` function.
-Both functions must have the same type.
+[`eg`](https://pkg.go.dev/golang.org/x/tools/cmd/eg) is the Go example-based
+refactoring tool from `golang.org/x/tools`. An `eg` template is a Go file with a
+`before` function and an `after` function. Both functions must have the same
+type.
 
 ### Minimal template
 
@@ -370,7 +422,8 @@ A skeptical user should challenge `sx` before trusting its output:
 
 ## Assistant Support
 
-This repository includes instructions for coding assistants:
+This repository includes assistant-facing instructions for running `sx`
+repeatably and safely:
 
 ```text
 .codex/skills/sx/SKILL.md
@@ -378,12 +431,26 @@ This repository includes instructions for coding assistants:
 .claude/commands/sx/bake.md
 ```
 
-`/sx:min [all|auto]` runs minimization in a temporary git worktree and reviews
-the resulting patch.
+[`.codex/skills/sx/SKILL.md`](.codex/skills/sx/SKILL.md) is a Codex skill with
+metadata, trigger guidance, and procedures for:
 
-`/sx:bake [path]` asks the assistant to create new `eg` examples from expression
-patterns in the codebase. If `path` is omitted, it writes to `sx/examples/eg`,
-which `sx` searches by default.
+- minimizing a Go repository with `sx`
+- baking new `eg` templates from repeated expression patterns
+- adding hand-written `eg` rules to a project
+
+[`.claude/commands/sx/min.md`](.claude/commands/sx/min.md) documents
+`/sx:min [all|auto]`. It runs minimization in a temporary git worktree and
+reviews the resulting patch before applying accepted changes.
+
+[`.claude/commands/sx/bake.md`](.claude/commands/sx/bake.md) documents
+`/sx:bake [path]`. It asks the assistant to create new `eg` examples from
+expression patterns in the codebase. If `path` is omitted, it writes to
+`sx/examples/eg`, which `sx` searches by default.
+
+The assistant workflows intentionally use a temporary git worktree for
+minimization. That keeps the user's checkout clean while `sx` tries patches,
+then gives the assistant a diff to review and copy back only when it is worth
+keeping.
 
 ## License
 
