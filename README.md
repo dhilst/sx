@@ -1,14 +1,23 @@
 # sx
 
-`sx` helps you shrink a Go module safely enough to use as a code-review aid.
+`sx` helps you fight LLM-generated bloat in Go code.
 
-It measures Go code by counting AST nodes, finds changes that should lower that
-count, tries one change at a time, and keeps only changes that still build, pass
-tests, and make the measured program smaller.
+LLMs are good at adding code: wrappers, fallback paths, adapters, one-off
+helpers, defensive branches, and repeated special cases. `sx` is pressure in the
+other direction. It measures Go code by counting AST nodes, finds changes that
+should lower that count, tries one change at a time, and keeps only changes that
+still build, pass tests, and make the measured program smaller.
 
 Use `sx` as a patch generator, not as an automatic cleanup tool. It optimizes
 for small code, so you should review every diff and keep only the changes that
 also make the code easier to maintain.
+
+You can use it iteratively during development, especially after LLM-assisted
+rounds that tend to leave extra structure behind. You can also run it as an
+automation step after those rounds, at your own risk, as long as the resulting
+patch is still reviewed like any other refactor. The main purpose is simple:
+after an LLM makes the code grow, `sx` looks for mechanically checkable ways to
+make it smaller again.
 
 ## Structural Complexity
 
@@ -30,6 +39,8 @@ reductions that add up to a smaller codebase.
 
 Use `sx` when you want to:
 
+- shrink AI-generated code after an LLM-assisted development round
+- push back against wrapper-heavy, branch-heavy, duplicated LLM output
 - find the largest functions in a Go package or module
 - remove unreachable functions detected by `deadcode`
 - inline one-use helpers through `gopls`
