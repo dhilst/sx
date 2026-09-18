@@ -28,63 +28,246 @@ the code grow.
 
 ## Agent and Automation Use
 
-The primary workflow is agent-driven: let a coding agent implement a change,
-then have it run `sx`, inspect the generated patch, and keep only the reductions
-that are worth reviewing.
+The primary workflow is agent-driven. A coding agent implements a change, then
+runs `sx` to take out the bloat that round added, reviews the patch, and applies
+it to your tree.
 
-This repository includes assistant-facing instructions for that workflow:
+This repository ships the assistant-facing instructions for that workflow:
 
-```text
-.codex/skills/sx/SKILL.md
-.claude/commands/sx.md
-.claude/commands/sx/min.md
-.claude/commands/sx/bake.md
-```
+| File | Client | What it defines |
+|---|---|---|
+| [`.codex/skills/sx/SKILL.md`](.codex/skills/sx/SKILL.md) | Codex | The `$sx` skill: when to use `sx`, `min`, `bake`, and adding `eg` rules by hand |
+| [`.claude/commands/sx.md`](.claude/commands/sx.md) | Claude Code | The `/sx <cmd> [param]` dispatcher |
+| [`.claude/commands/sx/min.md`](.claude/commands/sx/min.md) | Claude Code | `/sx min [auto\|all]` |
+| [`.claude/commands/sx/bake.md`](.claude/commands/sx/bake.md) | Claude Code | `/sx bake [path]` |
 
-[`.codex/skills/sx/SKILL.md`](.codex/skills/sx/SKILL.md) is the Codex skill. It
-documents when to use `sx`, how to minimize in a temporary git worktree, and how
-to add or bake `eg` rewrite templates.
-
-Use the same shape in Codex and slash-command clients:
+To use them in your own repository, copy the files to the same paths there. Both
+clients use the same command shape, with `$` in Codex and `/` in slash-command
+clients:
 
 ```text
 {$|/}sx <cmd> [param]
 ```
 
-where `cmd` is one of:
+| Command | Default | What it does |
+|---|---|---|
+| `sx min auto` | yes | Minimize in a temporary worktree, review the diff, and apply only the changes that read well |
+| `sx min all` | | Minimize in a temporary worktree and apply every change that passed the gates |
+| `sx bake` | path `sx/examples/eg` | Write new `eg` rewrite templates from patterns found in your code |
+| `sx bake <path>` | | The same, writing the templates to `<path>` |
 
-- `min [auto|all]`
-- `bake [path]`
+`/sx` with no command, or with an unknown one, prints the summary above.
 
-Examples:
+### Before you start
 
-```text
-$sx min auto
-$sx bake ./examples/eg
-/sx min auto
-/sx bake ./examples/eg
+The agent runs `sx` from your module, so set it up once:
+
+```bash
+go get -tool github.com/dhilst/sx/cmd/sx
+go install golang.org/x/tools/cmd/deadcode@latest
+go install golang.org/x/tools/gopls@latest
+go install golang.org/x/tools/cmd/eg@latest
 ```
 
-[`.claude/commands/sx.md`](.claude/commands/sx.md) documents the top-level
-`/sx <cmd> [param]` dispatcher.
+If the helpers are missing, the agent installs them when your policy allows it.
+Without `go get -tool`, it uses an installed `sx` binary, or asks you for one.
 
-[`.claude/commands/sx/min.md`](.claude/commands/sx/min.md) documents
-`/sx min [all|auto]`, which runs minimization in a temporary git worktree and
-reviews the resulting patch before applying accepted changes.
+### Tutorial: `sx min auto`
 
-[`.claude/commands/sx/bake.md`](.claude/commands/sx/bake.md) documents
-`/sx bake [path]`, which creates new `eg` examples from expression patterns in a
-codebase.
+Use this after an implementation round, when you want the bloat removed and
+want the agent to decide what is worth keeping.
 
-Outside an agent, `sx` also fits as a pre-push hook or CI step:
+1. **Commit your work.** `min` runs on a copy of `HEAD`. If your tree has
+   uncommitted or untracked files, the agent stops and asks you to either commit
+   them first or abort. It never minimizes `HEAD` while changes sit beside it,
+   because the resulting diff would not match the code you have.
+
+2. **Ask for it:**
+
+   ```text
+   /sx min
+   ```
+
+   `auto` is the default, so `/sx min auto` is the same. In Codex, use `$sx min`.
+
+3. **The agent works in a disposable worktree.** It runs, roughly:
+
+   ```bash
+   tmp=$(mktemp -d)
+   git worktree add -d "$tmp/worktree" HEAD
+   go tool sx refactor -apply -n 100 "$tmp/worktree"
+   ```
+
+   Every change is gated there: gofmt, build, the tests of each affected
+   package, and a re-count. Anything that fails a gate or does not shrink the
+   tree is reverted. Your checkout is not touched.
+
+4. **The agent tests and reviews the result.** It runs your project's test
+   command in the worktree (or `go test ./...`) and reads the diff.
+
+5. **It applies what reads well.** In `auto` mode the agent keeps the changes it
+   judges maintainable and briefly explains each one it drops. For example, it
+   might keep an inlined one-use helper and drop an inline that left a bare
+   `{ ... }` block behind.
+
+6. **The worktree is removed**, and the accepted changes are left uncommitted in
+   your tree for you to look over:
+
+   ```bash
+   git diff
+   ```
+
+An example of what the agent reports (the numbers are illustrative):
+
+```text
+sx: 10099 -> 9871 nodes (-228) in 14 changes, 17 attempts.
+Applied 12 changes:
+  - inlined parseFlags, loadConfig, newClient (each called once)
+  - removed unreachable legacyHandler and its "net/http/httputil" import
+  - extracted a repeated retry loop in fetch.go into one function
+  - strings.Index(s, "/") >= 0 -> strings.Contains(s, "/")
+Dropped 2:
+  - inline of render(): left a bare block with a renamed variable
+  - extraction in handlers.go: the new function needs five parameters
+```
+
+### Tutorial: `sx min all`
+
+Use this when you want every gated reduction applied, for example on generated
+scaffolding or on a branch you will squash, and you will review the diff
+yourself.
+
+```text
+/sx min all
+```
+
+The steps are the same as `auto`, except for step 5: every change that passed
+the gates is applied, and none is dropped for style. It is a good fit for a
+first pass on a large AI-written change. Follow it with a normal code review, or
+run `/sx min auto` next time.
+
+### Tutorial: `sx bake`
+
+`eg` templates teach `sx` expression rewrites specific to your codebase. `bake`
+has the agent find them for you.
+
+1. **Ask for it:**
+
+   ```text
+   /sx bake
+   ```
+
+2. **The agent looks for repeated larger-than-necessary expressions**, such as
+   a comparison against a constant, a manual loop that a standard library call
+   replaces, or a helper wrapped in a conversion it does not need.
+
+3. **It writes one template per rule** to `sx/examples/eg`:
+
+   ```go
+   //go:build ignore
+
+   package template
+
+   import "strings"
+
+   func before(s, prefix string) bool { return strings.Index(s, prefix) == 0 }
+   func after(s, prefix string) bool  { return strings.HasPrefix(s, prefix) }
+   ```
+
+   Each template's `before` and `after` have the same type, and a template never
+   drops, duplicates, or reorders an argument that could have side effects.
+
+4. **It validates them without writing to your code:**
+
+   ```bash
+   go tool sx refactor -check -eg sx/examples/eg .
+   ```
+
+   Templates that do not parse, do not type-check under `eg`, or do not shrink
+   the tree when they match are discarded.
+
+5. **Later `min` runs use them automatically.** `sx` searches `examples/eg` and
+   `sx/examples/eg` by default, so the next `/sx min` applies the new rules
+   along with everything else.
+
+Commit the templates like any other code. They are ordinary Go files kept out of
+your build by `//go:build ignore`.
+
+### Tutorial: `sx bake <path>`
+
+Use a path when your team keeps rules somewhere else, or keeps several rule
+sets:
+
+```text
+/sx bake ./tools/eg
+```
+
+The steps are the same, except the templates are written to and validated in
+`./tools/eg`. Because that is not a default search path, point `sx` at it
+yourself:
+
+```bash
+go tool sx refactor -check -eg ./tools/eg .
+go tool sx refactor -apply -eg ./tools/eg -eg sx/examples/eg .
+```
+
+`-eg` can be repeated or take comma-separated paths. Passing it replaces the
+default search paths, so list every directory you want.
+
+### More examples
+
+Minimize right after a feature lands:
+
+```text
+Implement the export-to-CSV command, commit it, then run /sx min.
+```
+
+Grow the rule set before minimizing:
+
+```text
+/sx bake
+/sx min auto
+```
+
+Keep a shared rule set in the repository and use it in every run:
+
+```text
+/sx bake ./examples/eg
+/sx min all
+```
+
+Minimize a single package (ask the agent directly):
+
+```text
+Run sx min on ./internal/storage only.
+```
+
+### Git hook
+
+Outside an agent, `sx` works as a pre-push hook. `-check` never writes files. It
+exits non-zero when a shrinking candidate exists, so the push stops until the
+bloat is handled:
+
+```bash
+#!/bin/sh
+# .git/hooks/pre-push
+exec go tool sx refactor -check -n 30 .
+```
+
+```bash
+chmod +x .git/hooks/pre-push
+```
+
+When the hook fires, run `/sx min` (or `go tool sx refactor -apply .`), commit,
+and push again.
+
+### CI
+
+The same check works as a CI step; see the [CI Example](#ci-example):
 
 ```bash
 go tool sx refactor -check -n 30 .
 ```
-
-That command never writes files. It fails when a shrinking candidate is found,
-which is useful when you want AI-generated bloat to be handled before the branch
-lands.
 
 ## Structural Complexity
 
