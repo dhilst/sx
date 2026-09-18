@@ -1,152 +1,145 @@
 # sx
 
-Negative pressure on the size of a Go codebase.
+`sx` helps you make a Go codebase smaller.
 
-Large language models generate code quickly, and most development loops make it
-easier to add code than to remove it. `sx` pushes in the opposite direction: it
-measures Go code by AST size, finds transformations that may reduce that size,
-applies them, and keeps only changes that make the program smaller while still
-building and passing tests.
+It counts Go AST nodes, looks for changes that should reduce that count, applies
+one change at a time, and keeps only the changes that still build, pass tests,
+and actually make the program smaller.
 
-The objective is deliberately narrow. `sx` optimizes for fewer AST nodes, not
-for readability. It may prefer longer functions, fewer helper functions, and
-inlining that a human reviewer would reject. Treat its output as a patch to
-review, not as a formatter.
+Use it as a patch generator, not as a formatter. `sx` optimizes for size, so you
+should still review the diff and reject changes that hurt clarity.
 
-## Quick Start
+## Install
 
-Add `sx` to a Go module as a tool dependency:
+In the Go module you want to shrink, add `sx` as a tool dependency:
 
 ```bash
 go get -tool github.com/dhilst/sx/cmd/sx
 ```
 
-That records it in `go.mod` and gives you `go tool sx` in that module: no binary
-on `PATH`, and the version pinned next to every other dependency.
-
-Install the external tools used for transformations:
-
-```bash
-go install golang.org/x/tools/cmd/deadcode@latest
-go install golang.org/x/tools/gopls@latest
-go install golang.org/x/tools/cmd/eg@latest
-```
-
-Measure a module:
+That pins the version in `go.mod` and lets you run:
 
 ```bash
 go tool sx .
 ```
 
-Preview one shrinking candidate:
-
-```bash
-go tool sx refactor .
-```
-
-Apply candidates and keep only changes that pass the gates:
-
-```bash
-go tool sx refactor -apply -n 30 .
-```
-
-Run the tests after the pass:
-
-```bash
-go test ./...
-```
-
-Inspect the patch before committing:
-
-```bash
-git diff
-```
-
-Inside this repository the tool dependency is its own `cmd/sx`, so `go tool sx`
-and `go run ./cmd/sx` build the same program. The examples below use the tool
-form because it is the one that also works from a module that only depends on
-`sx`.
-
-## The measure
-
-```text
-|AST| — the number of AST nodes it takes to express the program
-```
-
-Counting nodes rather than lines makes the measure independent of formatting and
-of comments, and it has no parameters: there is nothing to tune and nothing to
-validate against anyone's judgement. It is also additive — a node costs one
-wherever it sits — which is what makes it usable as a target rather than only as
-a ranking.
-
-Command form:
-
-```bash
-go tool sx [-json] [-n 20] [-tests] <paths...>
-```
-
-## The transformations
-
-The objective is `min |AST|` subject to behaviour: the same outputs and side
-effects for the same inputs and state. Four things remove nodes.
-
-| primitive | what it exploits | measured on this repository |
-|---|---|---|
-| **dead code** | a declaration nothing can reach | −41 in one move, the largest single win |
-| **duplication** | the same code written more than once | −39 in one move |
-| **inlining** | a function that only forwards | 17 moves, −2 to −27 each |
-| **example rewrites** | a larger expression with an equivalent smaller one | whatever the checked-in `eg` templates match |
-
-Detection is this tool's job. The transformations are not, wherever a maintained
-tool already does one properly:
-
-- **`deadcode`** answers reachability across a whole program, which a file at a
-  time syntactic pass cannot.
-- **`gopls`** inlines a call and extracts a function using type information —
-  free variables, return values, and whether the change is legal at all.
-- **`eg`** applies example-based expression rewrites from `examples/eg`.
+Install the helper tools used for refactoring:
 
 ```bash
 go install golang.org/x/tools/cmd/deadcode@latest
 go install golang.org/x/tools/gopls@latest
 go install golang.org/x/tools/cmd/eg@latest
-
-go tool sx refactor [-apply] [-check] [-n 30] [-eg examples/eg] <dir>
 ```
 
-None of these tools has any notion of which change is worth making. That is what the
-measure supplies.
+Inside this repository, `go tool sx` and `go run ./cmd/sx` build the same local
+program.
 
-### Example rewrites
+## Quick Start
 
-`eg` templates are Go files with a `before` function and an `after` function.
-Both functions must have the same type. `sx` asks `eg` where a template matches,
-estimates the AST saving, applies the template only when selected, and then runs
-the same build, test and measurement gates used for every other change.
-
-Default template search paths:
-
-```text
-examples/eg
-sx/examples/eg
-```
-
-Pass your own templates with `-eg`. The flag may be repeated, and each value may
-contain comma-separated paths or paths separated by the operating system path-list
-separator.
+Measure the current module:
 
 ```bash
-go tool sx refactor -apply -eg ./my-eg-rules -eg ./team/rules/time.go .
-go tool sx refactor -apply -eg ./my-eg-rules,./team/rules .
+go tool sx .
 ```
 
-Disable example rewrites:
+Preview the best candidate without editing files:
 
 ```bash
-go tool sx refactor -apply -eg "" .
+go tool sx refactor .
 ```
 
-The checked-in examples cover small expression reductions such as:
+Apply up to 30 candidates, keeping only changes that pass the gates:
+
+```bash
+go tool sx refactor -apply -n 30 .
+```
+
+Review the result:
+
+```bash
+go test ./...
+git diff
+```
+
+Use `-check` in CI to fail when `sx` can see at least one likely shrinking
+candidate:
+
+```bash
+go tool sx refactor -check -n 30 .
+```
+
+## What sx Changes
+
+`sx` looks for four kinds of reduction.
+
+| Kind | Example |
+|---|---|
+| Dead code | remove functions or declarations that nothing reaches |
+| Inlining | replace a tiny one-use helper with its body |
+| Duplication | extract repeated code when doing so reduces AST size |
+| `eg` examples | rewrite one expression shape into a smaller equivalent shape |
+
+Every attempted change goes through the same loop:
+
+1. apply the candidate
+2. run formatting and import repair
+3. rebuild
+4. run the relevant tests
+5. count AST nodes again
+6. keep the change only if the node count went down
+
+The predicted saving is only used to choose what to try first. The final count is
+what decides whether the patch stays.
+
+## Code Reduction Examples
+
+These are the kind of expression reductions included in `examples/eg`.
+
+```go
+// before
+if strings.Index(name, "/") >= 0 {
+	return true
+}
+
+// after
+if strings.Contains(name, "/") {
+	return true
+}
+```
+
+```go
+// before
+return fmt.Sprintf("%s", value)
+
+// after
+return value
+```
+
+```go
+// before
+return time.Now().Sub(start)
+
+// after
+return time.Since(start)
+```
+
+```go
+// before
+return bytes.Compare(a, b) == 0
+
+// after
+return bytes.Equal(a, b)
+```
+
+```go
+// before
+return enabled == true
+
+// after
+return enabled
+```
+
+The checked-in examples currently cover:
 
 ```text
 fmt.Errorf("%s", s)       -> errors.New(s)
@@ -161,24 +154,134 @@ strings.Index(s, sub)>=0  -> strings.Contains(s, sub)
 strings.Index(s, sub)==-1 -> !strings.Contains(s, sub)
 ```
 
-### CI mode
+## Using eg Examples
 
-Use `-check` to fail a build when a shrinking candidate exists. Check mode
-detects candidates and stops at the first one: it prints what it would do and
-exits non-zero. It never writes to the tree.
+`eg` is the Go example-based refactoring tool from `golang.org/x/tools`. An
+`eg` template is a Go file with a `before` function and an `after` function.
+Both functions must have the same type.
 
-That is deliberately weaker than what `-apply` knows. `-apply` earns its numbers
-by making the change and measuring it, and a check that edits the code it is
-checking is the wrong shape for CI. So `-check` reports the prediction rather
-than the proven saving, and the prediction is routinely wrong in both
-directions - including candidates that turn out not to be applicable at all.
-Expect it to fail on work `-apply` would end up rejecting.
+Example template:
 
-```bash
-go tool sx refactor -check -n 30 .
+```go
+//go:build ignore
+
+package template
+
+import "strings"
+
+func before(s, sub string) bool { return strings.Index(s, sub) >= 0 }
+func after(s, sub string) bool  { return strings.Contains(s, sub) }
 ```
 
-GitHub Actions example:
+Save templates in a directory and pass that directory to `sx`:
+
+```bash
+go tool sx refactor -check -eg ./examples/eg .
+go tool sx refactor -apply -eg ./examples/eg .
+```
+
+The `-eg` flag can be repeated:
+
+```bash
+go tool sx refactor -apply -eg ./examples/eg -eg ./team/eg .
+```
+
+It can also take comma-separated paths:
+
+```bash
+go tool sx refactor -apply -eg ./examples/eg,./team/eg .
+```
+
+Disable `eg` rewrites by passing an empty `-eg` value:
+
+```bash
+go tool sx refactor -apply -eg "" .
+```
+
+By default, `sx` searches these directories:
+
+```text
+examples/eg
+sx/examples/eg
+```
+
+## Tutorial: Add eg Examples to Your Codebase
+
+This is a small end-to-end example you can copy into your own Go module.
+
+1. Create a rule directory:
+
+   ```bash
+   mkdir -p sx/examples/eg
+   ```
+
+2. Add one file per rewrite. For example, create
+   `sx/examples/eg/full-string-slice.go`:
+
+   ```go
+   //go:build ignore
+
+   package template
+
+   func before(s string) string { return s[:len(s)] }
+   func after(s string) string  { return s }
+   ```
+
+3. Check whether the rule finds a shrinking candidate:
+
+   ```bash
+   go tool sx refactor -check -eg sx/examples/eg .
+   ```
+
+4. Apply it behind the normal build, test, and measurement gates:
+
+   ```bash
+   go tool sx refactor -apply -eg sx/examples/eg .
+   ```
+
+5. Review the patch:
+
+   ```bash
+   go test ./...
+   git diff
+   ```
+
+When writing your own rules:
+
+- keep `before` and `after` the same type
+- prefer a single returned expression in each function
+- add imports normally when the expressions need them
+- use `//go:build ignore` so templates are not compiled into your module
+- avoid rules that duplicate, remove, or reorder expressions with side effects
+- start with narrow, obvious rewrites and let `sx` prove the measured saving
+
+## Command Reference
+
+Measure Go files:
+
+```bash
+go tool sx [-json] [-n 20] [-tests] <paths...>
+```
+
+Refactor a module:
+
+```bash
+go tool sx refactor [-apply] [-check] [-n 30] [-test=false] [-eg path] <dir>
+```
+
+Useful flags:
+
+| Flag | Meaning |
+|---|---|
+| `-apply` | write changes; without it, only preview one candidate |
+| `-check` | fail when a shrinking candidate is found; never writes files |
+| `-n` | number of candidates to attempt |
+| `-test=false` | skip tests after each accepted-looking change |
+| `-eg` | file or directory of `eg` templates |
+| `-json` | emit measurement output as JSON |
+| `-tests` | include `_test.go` files when measuring |
+
+## CI Example
 
 ```yaml
 name: sx
@@ -202,14 +305,9 @@ jobs:
       - run: go tool sx refactor -check -n 30 .
 ```
 
-`go tool sx` resolves from the `tool` directive in your `go.mod`, so the version
-CI runs is the one the repository pins. If you would rather not record the
-dependency, `go run github.com/dhilst/sx/cmd/sx@latest refactor -check -n 30 .`
-works too, at the cost of an unpinned version.
+## Assistant Support
 
-### Assistant commands
-
-This repository includes project instructions for Codex and Claude:
+This repository includes instructions for coding assistants:
 
 ```text
 .codex/skills/sx/SKILL.md
@@ -217,150 +315,23 @@ This repository includes project instructions for Codex and Claude:
 .claude/commands/sx/bake.md
 ```
 
-`/sx:min [all|auto]` runs minimization in a temporary git worktree and then
-reviews the resulting patch.
+`/sx:min [all|auto]` runs minimization in a temporary git worktree and reviews
+the resulting patch.
 
-- `all` accepts every change that passes `sx` gates.
-- `auto` lets the model reject changes that reduce AST size but make the code
-  harder to maintain.
+`/sx:bake [path]` asks the assistant to create new `eg` examples from expression
+patterns in the codebase. If `path` is omitted, it writes to `sx/examples/eg`,
+which `sx` searches by default.
 
-`/sx:bake [path]` asks the model to create new `eg` examples from expression
-patterns in the codebase. If `path` is omitted, it writes to `sx/examples/eg`.
-That path is searched by default by later minimization runs.
+## Safety Notes
 
-## Nothing is kept on trust
+`sx` tries to preserve behavior by building, testing, and measuring after every
+change. It is still not a proof of semantic equivalence. Review the diff before
+committing, especially around public APIs, timing-sensitive code, error values,
+and code with side effects.
 
-After every change the tree is re-counted, rebuilt and re-tested. A change that
-does not shrink the program, or that breaks the build, or that fails the tests,
-is put back.
-
-The prediction attached to each candidate only orders the attempts. It is
-routinely wrong in both directions - it said -27 for something worth -8, and
--14 for something worth -39 - so the measurement afterwards is what decides.
-
-A failed build is read before it is judged. Removing the last user of a package
-leaves its import behind, and Go will not compile that: the transformation was
-unfinished, not unsafe. Unused imports are tidied and the build retried. Nothing
-else is repaired, because a fix that needs to guess what the author meant is
-another edit, with its own measurement and its own gate.
-
-## What a change can break is not what it touches
-
-The tests that run are the changed package's **and every package that imports
-it**, which `go list` works out once per run.
-
-Testing only what was edited is not a smaller version of this - it is a
-different thing that looks the same. Refactoring `internal/runtime/maps` passed
-that package's own suite, which is good enough to reject six other inlines in
-the same run, and left `reflect` corrupting type descriptors:
-
-```text
-fatal error: runtime: name offset base pointer out of range
-```
-
-The whole standard library still built, and every per-package gate was green.
-It took running `crypto/aes`'s tests to see it. The honest gate costs what it
-costs: for that package it is 261 packages and four and a half minutes per
-attempted change.
-
-## Where it will not go
-
-Three gates - build, tests, measure - agree on a great deal that is wrong,
-because each has a boundary and the loop finds whatever lives outside it. So
-the boundaries are declared rather than discovered:
-
-| left alone | because |
-|---|---|
-| files this build does not compile | `go build` and `go test` cannot say whether the edit is safe. Editing them rewrote Windows, plan9, wasip1 and s390x source with every gate green |
-| generated files | the edit is erased on the next run, and the file says so |
-| test files | the measure does not count them, so moving a body there reads as a saving. On a two-function package: 29 nodes to 12, nothing deleted |
-| bodies using `unsafe` | what `unsafe.Pointer` guarantees depends on where a value lives and how long. `reflectlite.packEface` carries a comment that its correctness depends on no operation coming between two assignments |
-| functions under a `//go:` directive | `//go:nosplit` fixes a stack budget; moving a body in is what it forbids |
-| names declared once per platform | which one a call resolves to is a build-tag question |
-| functions held as values | `var Exported = unexported` in an export_test.go is a live reference that is not a call |
-
-Every one of those was found by running this on the Go standard library, and
-every one of them built, passed its tests, and measured smaller.
-
-## Why greedy
-
-Greedy is wrong when a move only pays by enabling another, and inlining is
-exactly that case: on its own it always makes the program bigger, because the
-body then exists at the call site *and* in the declaration. It only becomes a
-saving once the declaration goes. So the two are applied as one move, and
-`deadcode` confirms the abstraction really can go.
-
-With that pair made atomic, searching over orderings stops paying. A beam search
-was built and measured against the greedy loop on this codebase:
-
-```text
-greedy    -318 nodes (-4.0%), 22 changes, converged      2m11s
-beam      -174 nodes (-2.2%),  8 changes, depth-limited  6m01s
-```
-
-It lost for structural reasons rather than tuning ones. A beam of depth d can
-never make more than d changes, while greedy runs until the candidates are gone.
-Width bought nothing: at depth 8 the best six states spanned 8 nodes and were
-permutations of the same moves, because these transformations commute. The one
-thing it found that greedy cannot see was an ordering worth 13 nodes.
-
-So the search was removed. It is worth rebuilding the day a transformation
-appears whose order actually matters.
-
-## What it does
-
-On its own source, to a fixed point:
-
-```text
-8369 -> 8289 nodes   (-80, -1.0%)
-8 changes kept, 21 attempted
-```
-
-Running it again keeps nothing: a second pass re-offers everything the first
-rejected, in the same order, with the same verdicts. It is a fixed point of
-these three primitives and no more.
-
-On 55 packages of the Go standard library, gated on every importer, with the
-result left building and passing `go test std`:
-
-```text
-nodes  294086 -> 292157   (-1929, -0.7%)
-raw     77674 ->  76250   (-1424, -1.8%)
-code    53605 ->  53343   ( -262, -0.5%)
-156 changes kept
-```
-
-Read those three lines together. **Of the 1424 lines removed, 1162 are comments
-and blank lines** - removing a function deletes its documentation, while the
-body does not go anywhere, it moves to the call site. Half a percent of the code
-went. "1424 lines saved" would be mostly a report of deleted documentation.
-
-That is 55 of the 117 leaf packages with candidates. Twelve more were already
-failing or too slow to gate. The remaining fifty were left out because gating
-them honestly is unaffordable - `internal/cpu` has 267 importers,
-`internal/runtime/maps` 260 - and those are exactly the packages with the most
-to remove. The excluded half is the expensive half, not a random sample.
-
-For comparison, from this repository's own history:
-
-```text
-deleting the beam search        -1564 nodes of 8033    (-19.5%)
-the standard library sweep      -1929 nodes of 294086   (-0.7%)
-```
-
-Deciding one feature did not earn its place beat the whole automated pipeline
-applied to the standard library. Nothing here can find that: it measures what
-exists, and cannot ask whether it should.
-
-## What it costs
-
-`min |AST|` says a function called once is always a loss: you pay for the
-declaration, the signature, the return and the call, and get one use back. So it
-deletes single-use abstractions, and the fixed point has none left. Seventeen
-helpers went that way in the run above.
-
-That is the objective working, not failing, but it is the whole objective. It
-knows nothing about whether the result is easier to read.
+`-check` is intentionally conservative for CI. It reports a predicted candidate
+without editing the tree. A candidate reported by `-check` may later be rejected
+by `-apply` after the real build, test, and measurement gates run.
 
 ## License
 

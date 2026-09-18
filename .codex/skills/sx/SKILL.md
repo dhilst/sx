@@ -1,7 +1,13 @@
+---
+name: "sx"
+description: "Use when the user asks Codex to minimize a Go codebase with sx, run /sx:min, bake /sx:bake eg examples, or add AST-reducing eg templates to a Go project."
+---
+
 # sx
 
 Use this skill when the user asks to minimize a Go codebase with `sx`, asks for
-`/sx:min`, or asks for `/sx:bake`.
+`/sx:min`, asks for `/sx:bake`, or asks to add `eg` examples for AST-reducing
+rewrites.
 
 `sx` applies negative pressure to Go code size. It measures AST nodes, proposes
 shrinking refactors, applies them behind build/test/measure gates, and keeps only
@@ -90,7 +96,8 @@ Never add a co-author trailer unless the user explicitly asks for one.
 
 ## /sx:bake [path]
 
-Create `eg` examples from recurring expressions in the current codebase.
+Create `eg` examples from recurring expressions in the current codebase. These
+rules are ordinary Go files that `sx refactor -eg <path>` can try later.
 
 Default path:
 
@@ -123,3 +130,43 @@ Procedure:
 
 The default minimization command searches `examples/eg` and `sx/examples/eg`, so
 examples baked to the default path are picked up by later `/sx:min` runs.
+
+## Adding eg rules by hand
+
+Use this when the user asks how to add custom examples to their own codebase.
+
+1. Create a directory in the target repository, usually `sx/examples/eg` or
+   `examples/eg`.
+2. Add one `.go` file per rule. Keep the file excluded from normal builds:
+
+   ```go
+   //go:build ignore
+
+   package template
+
+   func before(s string) string { return s[:len(s)] }
+   func after(s string) string  { return s }
+   ```
+
+3. Keep `before` and `after` the same type, and prefer single-expression
+   functions. `sx` prices the difference between those expressions before asking
+   `eg` to apply the rule.
+4. Avoid rules that delete, duplicate, or reorder arguments that could have side
+   effects.
+5. Validate the rules from the repository root:
+
+   ```bash
+   go tool sx refactor -check -eg sx/examples/eg .
+   ```
+
+   Inside the `sx` source checkout, use:
+
+   ```bash
+   go run ./cmd/sx refactor -check -eg sx/examples/eg .
+   ```
+
+6. Apply them only behind the normal gates:
+
+   ```bash
+   go tool sx refactor -apply -eg sx/examples/eg .
+   ```
