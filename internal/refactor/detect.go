@@ -127,11 +127,14 @@ type deadReport struct {
 // after ForgetDead.
 func (c *Cache) Dead(deadcodePath, dir string) ([]Candidate, error) {
 	if !c.deadOK {
+		// A failure is remembered too: a library module has no main
+		// package, deadcode refuses it every time, and asking again each
+		// pass cost milvus/pkg three and a half minutes a run.
 		reports, err := runDeadcode(deadcodePath, dir)
-		if err != nil {
-			return nil, err
-		}
-		c.dead, c.deadOK = reports, true
+		c.dead, c.deadOK, c.deadErr = reports, true, err
+	}
+	if c.deadErr != nil {
+		return nil, c.deadErr
 	}
 	var cands []Candidate
 	deadNames := map[string]map[string]bool{} // package directory -> dead function names

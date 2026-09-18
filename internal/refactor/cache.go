@@ -32,6 +32,7 @@ type Cache struct {
 	paths   map[string]string // package directory -> import path
 	pkgs    map[string]*cachedPackage
 	dead    []deadReport // deadcode's last answer
+	deadErr error
 	deadOK  bool
 }
 
@@ -75,7 +76,7 @@ func (c *Cache) Begin(dir string) error {
 }
 
 // ForgetDead drops deadcode's answer, so the next pass asks again.
-func (c *Cache) ForgetDead() { c.dead, c.deadOK = nil, false }
+func (c *Cache) ForgetDead() { c.dead, c.deadOK, c.deadErr = nil, false, nil }
 
 // buildFiles is what the current build compiles in dir, tests excluded.
 func buildFiles(dir string) []string {
