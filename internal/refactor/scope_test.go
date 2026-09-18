@@ -2,6 +2,7 @@ package refactor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"slices"
 	"strings"
@@ -170,5 +171,31 @@ func TestWithoutDropsOnePackage(t *testing.T) {
 	got := TestScope(root).Without("m/unstable").Packages()
 	if !slices.Equal(got, []string{"m/stable"}) {
 		t.Fatalf("scope = %v, want [m/stable]", got)
+	}
+}
+
+// A test that has both passed and failed on the same tree is flaky; one that
+// failed only on a different tree is not.
+func TestFlakyTestsAreThoseThatChangeOnOneTree(t *testing.T) {
+	dir := t.TempDir()
+	for _, args := range [][]string{{"init", "-q"}, {"commit", "-q", "--allow-empty", "-m", "init"}} {
+		cmd := exec.Command("git", append([]string{"-c", "commit.gpgsign=false", "-c", "user.name=t", "-c", "user.email=t@t"}, args...)...)
+		cmd.Dir = dir
+		if out, err := cmd.CombinedOutput(); err != nil {
+			t.Fatalf("%v: %s", err, out)
+		}
+	}
+	h, err := OpenHistory(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	record := h.Recorder()
+	record("m/p", "TestFlaky", "pass", 0)
+	record("m/p", "TestFlaky", "fail", 0)
+	record("m/p", "TestSteady", "pass", 0)
+	h.Close(RunMetrics{})
+	flaky := FlakyTests(dir)
+	if !flaky["m/p\x00TestFlaky"] || flaky["m/p\x00TestSteady"] || len(flaky) != 1 {
+		t.Fatalf("flaky = %v, want only TestFlaky", flaky)
 	}
 }

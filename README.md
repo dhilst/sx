@@ -434,6 +434,58 @@ go tool sx refactor -check -n 30 .
 A `-check` candidate is a prediction from the transformation models. `-apply`
 then confirms it with the real build, test, and measurement gates.
 
+### Batched testing
+
+On a project whose tests are slow, testing after every change dominates the
+run. `-batch` commits each change that builds and shrinks the tree, runs the
+tests once at the end, and only if they fail looks for the cause:
+
+```bash
+go tool sx refactor -apply -batch -n 60 .
+```
+
+1. Each kept change is a commit (`sx: <kind> <target> (a -> b nodes)`). The
+   tree must be clean when the run starts.
+2. At the end the test scope runs once. If a test fails that passed at the
+   start, `git`-style bisection finds the first commit that makes it fail.
+3. That commit is checked again, bypassing Go's test cache. If it does not
+   fail again, the test is flaky: it is skipped from then on and the run is
+   tested again.
+4. Otherwise the run goes back to just before that commit, the change is
+   marked as tried, and detection continues. The changes after it are found
+   again on the current tree rather than replayed, so an independent change
+   is never lost because its lines touched the bad one's.
+5. When the tests pass, the commits are squashed into one whose message gives
+   the totals (changes, nodes, lines, per kind). The separate commits stay
+   under `refs/sx/runs/<run>`.
+
+With *n* changes of which *k* break a test, the tests run about
+1 + k(log₂ n + 2) times instead of *n*.
+
+Everything a batched run learns goes into a SQLite database at
+`.git/sx/sx.db`, out of the working tree:
+
+| Table | Holds | Indexed by |
+|---|---|---|
+| `runs` | each run's totals: nodes and lines before and after, attempts, changes kept and dropped, per kind, time spent detecting, applying and testing | run |
+| `tests` | every test result: commit, tree, package, test, the file it is declared in, outcome, time | test name, file, commit, tree |
+| `changes` | every committed change: kind, target, predicted and measured nodes, lines added and removed, and why it was dropped | commit, run |
+
+A test that has both passed and failed on the same tree is flaky, whatever
+changed; every later run, batched or not, skips it from the start. The
+database answers other questions too:
+
+```bash
+sqlite3 .git/sx/sx.db "SELECT file, test, COUNT(*) FROM tests WHERE outcome='fail' GROUP BY 1, 2 ORDER BY 3 DESC"
+```
+
+`sx status` lists the runs:
+
+```text
+RUN                     NODES     AFTER   ΔNODES ΔNODES%   ΔLOC   KEPT DEDUP  DEAD  INLN   EG     TIME
+20260918-194252.132        60        45      -15 -25.00%     -2   1/2      0     0     1    0      17s
+```
+
 ### Disable tests for a fast exploratory run
 
 ```bash
@@ -671,7 +723,13 @@ go tool sx [-json] [-n 20] [-tests] <paths...>
 Refactor a module:
 
 ```bash
-go tool sx refactor [-apply] [-check] [-n 10] [-test=false] [-eg path] [-cpuprofile file] [path]
+go tool sx refactor [-apply] [-check] [-batch] [-n 10] [-test=false] [-eg path] [-cpuprofile file] [path]
+```
+
+Show the recorded runs of the repository:
+
+```bash
+go tool sx status [path]
 ```
 
 Useful flags:
@@ -687,6 +745,7 @@ Useful flags:
 | `-test=false` | refactor | Skip tests after each accepted-looking change |
 | `-eg` | refactor | File or directory of `eg` templates; repeatable. Default: `examples/eg` and `sx/examples/eg` under the target path, its module root, its repository root, and the current directory |
 | `-cpuprofile` | refactor | Write a CPU profile of the run to a file |
+| `-batch` | refactor | Commit each change and run the tests once at the end instead of after every change; see [Batched testing](#batched-testing) |
 
 ## CI Example
 

@@ -30,6 +30,13 @@ type Scope struct {
 	root    string   // module directory the tests are run from
 	pkgs    []string // import paths: the packages under the directory, then their importers
 	targets int      // how many of pkgs are under the directory
+	record  func(pkg, test, outcome string, elapsed float64)
+}
+
+// Record has every test result passed to f as well as reported.
+func (s Scope) Record(f func(pkg, test, outcome string, elapsed float64)) Scope {
+	s.record = f
+	return s
 }
 
 // TestScope works out what has to pass for a change under dir to be accepted:
@@ -95,7 +102,7 @@ func (s Scope) Without(pkg string) Scope {
 		}
 		kept = append(kept, p)
 	}
-	return Scope{root: s.root, pkgs: kept, targets: targets}
+	return Scope{root: s.root, pkgs: kept, targets: targets, record: s.record}
 }
 
 // Targets is how many of the scope's packages are under the directory; the
@@ -191,9 +198,13 @@ func (s Scope) run(skip Failures, fresh bool) (Failures, error) {
 			Action  string
 			Package string
 			Test    string
+			Elapsed float64
 		}
 		if err := dec.Decode(&ev); err != nil {
 			break
+		}
+		if s.record != nil && ev.Test != "" && (ev.Action == "pass" || ev.Action == "fail" || ev.Action == "skip") {
+			s.record(ev.Package, ev.Test, ev.Action, ev.Elapsed)
 		}
 		if ev.Action != "fail" {
 			continue

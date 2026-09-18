@@ -47,6 +47,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		check := fs.Bool("check", false, "exit non-zero at the first shrinking candidate; never writes to the tree")
 		rounds := fs.Int("n", 10, "how many changes to attempt")
 		runTests := fs.Bool("test", true, "run the tests after each change and revert if they fail")
+		batch := fs.Bool("batch", false, "commit each change and test once at the end, bisecting any failure to the change that caused it; needs -apply and a clean git tree")
 		cpuprofile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
 		fs.Var(&egPaths, "eg", "file or directory of eg templates; repeat or separate with commas/path-list separators (empty disables eg)")
 		if err := fs.Parse(args); err != nil {
@@ -116,15 +117,34 @@ func run(args []string, stdout, stderr io.Writer) error {
 				n, scope.Targets(), dir, n-scope.Targets())
 		}
 
+		var hist *refactor.History
+		if *batch {
+			if !*apply || !*runTests {
+				return fmt.Errorf("-batch needs -apply and the tests")
+			}
+			if hist, err = refactor.OpenHistory(dir); err != nil {
+				return err
+			}
+			scope = scope.Record(hist.Recorder())
+			fmt.Fprintf(stdout, "  (batched: each change is committed and the tests run once at the end; run %s)\n", hist.Run)
+		}
+
 		// What already fails before the first change is not the change's
 		// doing: it is skipped, and the gate asks only for new failures.
+		// Tests recorded as flaky by earlier runs are skipped from the start.
 		var baseline refactor.Failures
+		testTime, testRuns := time.Duration(0), 0
 		if *apply && *runTests {
 			start := time.Now()
-			baseline, err = scope.Failures(nil)
+			known := refactor.FlakyTests(dir)
+			baseline, err = scope.Failures(known)
 			if err != nil {
 				return err
 			}
+			for k := range known {
+				baseline[k] = true
+			}
+			testTime, testRuns = time.Since(start), 1
 			if len(baseline) > 0 {
 				var names []string
 				for k := range baseline {
@@ -180,6 +200,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			}
 			fmt.Fprintf(stdout, "time: %s\n", strings.Join(parts, ", "))
 		}()
+		dropped := 0
+	batched:
 		for attempted < *rounds {
 			detect := func() (refactor.Candidate, bool) {
 				var all []refactor.Candidate
@@ -280,7 +302,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 			after, scoreErr := scoreTree(dir)
 			var testErr error
 			var failures refactor.Failures
-			if *runTests && scoreErr == nil && builds {
+			if *runTests && !*batch && scoreErr == nil && builds {
 				if failures, testErr = scope.Failures(baseline); testErr == nil {
 					testErr = failures.Since(baseline)
 				}
@@ -350,7 +372,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 					return err
 				}
 			default:
-				fmt.Fprintf(stdout, "  %-2d %7s  %-6s %-22s %d -> %d (-%d, predicted -%d), tests pass\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted)
+				verdict := "tests pass"
+				if hist != nil {
+					verdict = "committed"
+					if err := hist.Commit(c, before, after); err != nil {
+						return err
+					}
+				}
+				fmt.Fprintf(stdout, "  %-2d %7s  %-6s %-22s %d -> %d (-%d, predicted -%d), %s\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted, verdict)
 				before = after
 				applied++
 			}
@@ -358,8 +387,47 @@ func run(args []string, stdout, stderr io.Writer) error {
 			pending = nil
 			pendingMu.Unlock()
 		}
+		if hist != nil {
+			// Test the batch; if a change broke something, go back to just
+			// before it and carry on detecting from there.
+			bad, why, err := verifyBatch(stdout, hist, scope, baseline, &testTime, &testRuns)
+			if err != nil {
+				return err
+			}
+			if bad != "" {
+				key, kind := hist.KeyOf(bad), hist.KindOf(bad)
+				// The changes after the bad one go with it, but only the bad
+				// one was at fault: the others may be offered again.
+				commits := hist.Commits()
+				for i := len(commits) - 1; i >= 0 && commits[i] != bad; i-- {
+					delete(tried, hist.KeyOf(commits[i]))
+				}
+				if err := hist.ResetTo(bad+"^", why.Error()); err != nil {
+					return err
+				}
+				tried[key] = true
+				dropped++
+				before, _ = scoreTree(dir)
+				applied = len(hist.Commits())
+				fmt.Fprintf(stdout, "      dropped the %s at %s (%v) and the changes after it; detecting again\n", kind, short(bad), why)
+				goto batched
+			}
+			kept, err := finishBatch(stdout, dir, hist, attempted, dropped, spent, testTime, testRuns)
+			if err != nil {
+				return err
+			}
+			before, _ = scoreTree(dir)
+			applied = kept
+		}
 		fmt.Fprintf(stdout, "\n%d nodes after %d changes in %d attempts\n", before, applied, attempted)
 		return nil
+	}
+	if len(args) > 0 && args[0] == "status" {
+		dir := "."
+		if len(args) > 1 {
+			dir = args[1]
+		}
+		return status(stdout, dir)
 	}
 	fs := flag.NewFlagSet("sx", flag.ContinueOnError)
 	fs.SetOutput(stderr)

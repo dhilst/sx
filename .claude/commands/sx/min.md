@@ -80,6 +80,12 @@ Steps:
    go tool sx refactor -apply -n 100 "$tmp/worktree/$path"
    ```
 
+   When the project's tests are slow, add `-batch`: each change is committed
+   in the worktree, the tests run once at the end, a failure is bisected to
+   the change that caused it, and the run is squashed into one commit. Review
+   it with `git -C "$tmp/worktree" show` instead of `diff`; the separate
+   commits are under `refs/sx/runs/`. `sx status` lists past runs.
+
    If the build needs generated or downloaded files that are not committed
    (frontend assets under `//go:embed`, generated code), create them in the
    worktree first, or the gate reverts every change as "stopped building".
