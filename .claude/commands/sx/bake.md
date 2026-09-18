@@ -1,7 +1,16 @@
-# /sx:bake [path]
+# /sx bake [path]
 
 Create `eg` templates for `sx` from expression patterns in the current Go
 codebase.
+
+Canonical invocation:
+
+```text
+/sx bake
+/sx bake ./examples/eg
+```
+
+Legacy `/sx:bake [path]` means the same thing when supported by the client.
 
 Default output path:
 
@@ -40,4 +49,4 @@ Steps:
 6. Keep templates that parse, type-check under `eg`, and reduce AST size when
    they match.
 
-Later `/sx:min` runs search both `examples/eg` and `sx/examples/eg` by default.
+Later `/sx min` runs search both `examples/eg` and `sx/examples/eg` by default.

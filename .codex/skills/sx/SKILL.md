@@ -1,19 +1,47 @@
 ---
 name: "sx"
-description: "Use when the user asks Codex to minimize a Go codebase with sx, run /sx:min, bake /sx:bake eg examples, or add AST-reducing eg templates to a Go project."
+description: "Use when the user asks Codex to minimize a Go codebase with sx, run $sx min or /sx min, bake $sx bake or /sx bake eg examples, or add AST-reducing eg templates to a Go project."
 ---
 
 # sx
 
 Use this skill when the user asks to minimize a Go codebase with `sx`, asks for
-`/sx:min`, asks for `/sx:bake`, or asks to add `eg` examples for AST-reducing
-rewrites.
+`$sx min`, `/sx min`, `$sx bake`, `/sx bake`, or asks to add `eg` examples for
+AST-reducing rewrites.
 
 `sx` applies negative pressure to Go code size. It measures AST nodes, proposes
 shrinking refactors, applies them behind build/test/measure gates, and keeps only
 changes that reduce AST size.
 
-## /sx:min [all|auto]
+## Command syntax
+
+Use one command shape across Codex-style skill invocation and slash-command
+clients:
+
+```text
+{$|/}sx <cmd> [param]
+```
+
+Commands:
+
+- `min [auto|all]`: minimize the current Go repository. Default is `auto`.
+- `bake [path]`: create `eg` examples. Default path is `sx/examples/eg`.
+
+Examples:
+
+```text
+$sx min auto
+$sx min all
+$sx bake
+$sx bake ./examples/eg
+/sx min auto
+/sx bake ./examples/eg
+```
+
+Legacy spellings such as `/sx:min` and `/sx:bake` mean the same thing when a
+client exposes them.
+
+## sx min [all|auto]
 
 Minimize the current Go repository in a temporary git worktree, then review the
 result with the user.
@@ -94,7 +122,7 @@ Procedure:
 
 Never add a co-author trailer unless the user explicitly asks for one.
 
-## /sx:bake [path]
+## sx bake [path]
 
 Create `eg` examples from recurring expressions in the current codebase. These
 rules are ordinary Go files that `sx refactor -eg <path>` can try later.
@@ -129,7 +157,7 @@ Procedure:
    when they match.
 
 The default minimization command searches `examples/eg` and `sx/examples/eg`, so
-examples baked to the default path are picked up by later `/sx:min` runs.
+examples baked to the default path are picked up by later `sx min` runs.
 
 ## Adding eg rules by hand
 

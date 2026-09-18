@@ -1,7 +1,16 @@
-# /sx:min [all|auto]
+# /sx min [all|auto]
 
 Minimize the current Go repository with `sx` in a temporary git worktree, then
 review and apply accepted changes.
+
+Canonical invocation:
+
+```text
+/sx min auto
+/sx min all
+```
+
+Legacy `/sx:min [all|auto]` means the same thing when supported by the client.
 
 Modes:
 

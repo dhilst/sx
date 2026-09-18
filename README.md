@@ -28,6 +28,7 @@ This repository includes assistant-facing instructions for that workflow:
 
 ```text
 .codex/skills/sx/SKILL.md
+.claude/commands/sx.md
 .claude/commands/sx/min.md
 .claude/commands/sx/bake.md
 ```
@@ -36,12 +37,35 @@ This repository includes assistant-facing instructions for that workflow:
 documents when to use `sx`, how to minimize in a temporary git worktree, and how
 to add or bake `eg` rewrite templates.
 
+Use the same shape in Codex and slash-command clients:
+
+```text
+{$|/}sx <cmd> [param]
+```
+
+where `cmd` is one of:
+
+- `min [auto|all]`
+- `bake [path]`
+
+Examples:
+
+```text
+$sx min auto
+$sx bake ./examples/eg
+/sx min auto
+/sx bake ./examples/eg
+```
+
+[`.claude/commands/sx.md`](.claude/commands/sx.md) documents the top-level
+`/sx <cmd> [param]` dispatcher.
+
 [`.claude/commands/sx/min.md`](.claude/commands/sx/min.md) documents
-`/sx:min [all|auto]`, which runs minimization in a temporary git worktree and
+`/sx min [all|auto]`, which runs minimization in a temporary git worktree and
 reviews the resulting patch before applying accepted changes.
 
 [`.claude/commands/sx/bake.md`](.claude/commands/sx/bake.md) documents
-`/sx:bake [path]`, which creates new `eg` examples from expression patterns in a
+`/sx bake [path]`, which creates new `eg` examples from expression patterns in a
 codebase.
 
 Outside an agent, `sx` also fits as a pre-push hook or CI step:
