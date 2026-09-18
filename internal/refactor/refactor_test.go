@@ -1,6 +1,9 @@
 package refactor
 
 import (
+	"go/ast"
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
@@ -195,7 +198,7 @@ func after(s string) string  { return s }
 `), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m, err := predictEg(packages{}, dir, tmpl)
+	m, _, err := predictEg(NewCache(), dir, tmpl)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -955,6 +958,34 @@ func packIt(p *int) uintptr {
 	for _, c := range cs {
 		if c.Target == "packIt" {
 			t.Fatal("a body using unsafe was offered for inlining")
+		}
+	}
+}
+
+// Statements that differ only in an operator or a token are different
+// statements. The hash once ignored them, and a run ending in "count += n"
+// was extracted and pasted over one ending in "count -= n".
+func TestStatementsDifferingOnlyInATokenHashApart(t *testing.T) {
+	for _, pair := range [][2]string{
+		{"count += n", "count -= n"},
+		{"x = a + b", "x = a - b"},
+		{"x++", "x--"},
+		{"x := y", "x = y"},
+		{"f(xs...)", "f(xs)"},
+		{"x = !ok", "x = -ok"},
+		{"var c chan<- int", "var c <-chan int"},
+		{"for { break }", "for { continue }"},
+		{"x = s[a:b:c]", "x = s[a:b]"},
+	} {
+		digest := func(src string) [32]byte {
+			f, err := parser.ParseFile(token.NewFileSet(), "p.go", "package p\nfunc _() {\n"+src+"\n}\n", 0)
+			if err != nil {
+				t.Fatalf("%s: %v", src, err)
+			}
+			return stmtDigest(f.Decls[0].(*ast.FuncDecl).Body.List[0])
+		}
+		if digest(pair[0]) == digest(pair[1]) {
+			t.Errorf("%q and %q hash the same", pair[0], pair[1])
 		}
 	}
 }

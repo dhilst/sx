@@ -1,7 +1,6 @@
 package refactor
 
 import (
-	"bytes"
 	"fmt"
 	"go/ast"
 	"go/importer"
@@ -10,8 +9,6 @@ import (
 	"go/types"
 	"io"
 	"os"
-	"os/exec"
-	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -77,37 +74,34 @@ type typedPackage struct {
 	files map[string]*ast.File
 	pkg   *types.Package
 	info  *types.Info
+	uses  map[types.Object][]*ast.Ident // info.Uses by object, built on first need
 }
 
-// parsePackage parses one package's files with a shared FileSet.
-func parsePackage(paths []string) (*typedPackage, error) {
-	tp := &typedPackage{fset: token.NewFileSet(), files: map[string]*ast.File{}}
-	for _, path := range paths {
-		f, err := parser.ParseFile(tp.fset, path, nil, parser.SkipObjectResolution)
-		if err != nil {
-			return nil, err
+// usesOf is every identifier that refers to obj. The extraction model asked
+// this for every variable of every candidate run by scanning info.Uses, which
+// was a quarter of a detection pass on a large package.
+func (tp *typedPackage) usesOf(obj types.Object) []*ast.Ident {
+	if tp.uses == nil {
+		tp.uses = map[types.Object][]*ast.Ident{}
+		for id, o := range tp.info.Uses {
+			tp.uses[o] = append(tp.uses[o], id)
 		}
-		tp.files[path] = f
 	}
-	return tp, nil
+	return tp.uses[obj]
 }
 
-// check type-checks the package in dir. Imports are read from the export
-// data go list produces, which is the same thing the compiler reads.
-func (tp *typedPackage) check(dir string) error {
-	exports := map[string]string{}
-	cmd := exec.Command("go", "list", "-e", "-deps", "-export", "-f", "{{if .Export}}{{.ImportPath}}={{.Export}}{{end}}", ".")
-	cmd.Dir = dir
-	var out bytes.Buffer
-	cmd.Stdout = &out
-	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("go list: %w", err)
-	}
-	for _, line := range strings.Split(out.String(), "\n") {
-		if path, file, ok := strings.Cut(line, "="); ok {
-			exports[path] = file
+// check type-checks the package. Imports are read from export data, the
+// same thing the compiler reads, listed once per pass by Cache.Begin.
+func (tp *typedPackage) check(exports map[string]string) (err error) {
+	// The importer panics on export data newer than the Go that built sx:
+	// flowstate needs Go 1.27, and sx built with 1.25 cannot read what its
+	// toolchain writes. A package that cannot be type-checked is left out of
+	// the models, not allowed to end the run.
+	defer func() {
+		if r := recover(); r != nil {
+			err = fmt.Errorf("type-checking: %v", r)
 		}
-	}
+	}()
 	conf := types.Config{
 		Importer: importer.ForCompiler(tp.fset, "gc", func(path string) (io.ReadCloser, error) {
 			file, ok := exports[path]
@@ -270,6 +264,16 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 		return false
 	})
 	hasReturn := len(returns) > 0
+	if what := frameBound(info, stmts); what != "" {
+		// A defer runs when the function it is in returns, and recover
+		// only works in a deferred call of the panicking frame. Moved into
+		// the helper, "configMu.Lock(); defer configMu.Unlock()" released
+		// cc-connect's config lock as soon as the helper returned, and the
+		// caller read, changed and saved the file unlocked; "defer
+		// resp.Body.Close()" closed a body the helper then returned. Both
+		// compiled, passed every test, and shrank the tree.
+		return e, fmt.Errorf("the run contains %s, which belongs to the enclosing function's frame", what)
+	}
 	if freeBranch(info, parent, stmts, start, end) {
 		// gopls threads these through a control value and a switch at the
 		// call site. That is not modelled, so it is not attempted.
@@ -294,7 +298,7 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 		if v.obj.Name() == "_" || v.obj.Parent() == nil {
 			continue
 		}
-		used, firstUse := usedIn(info, end, v.obj.Parent().End(), v.obj)
+		used, firstUse := usedIn(tp, end, v.obj.Parent().End(), v.obj)
 		result := v.assigned && used && !overridden(info, firstUse, v.obj, v.free, outer)
 		param := v.free && !v.defined
 		if (result || param) && aliased(info, stmts, v.obj) {
@@ -682,10 +686,10 @@ func runVariables(info *types.Info, file *ast.File, block ast.Node, start, end t
 }
 
 // usedIn reports whether obj is used between start and end, and where first.
-func usedIn(info *types.Info, start, end token.Pos, obj types.Object) (bool, *ast.Ident) {
+func usedIn(tp *typedPackage, start, end token.Pos, obj types.Object) (bool, *ast.Ident) {
 	var first *ast.Ident
-	for ident, o := range info.Uses {
-		if o != obj || ident.Pos() < start || ident.End() > end {
+	for _, ident := range tp.usesOf(obj) {
+		if ident.Pos() < start || ident.End() > end {
 			continue
 		}
 		if first == nil || ident.Pos() < first.Pos() {
@@ -934,44 +938,125 @@ func packagesIn(info *types.Info, nodes ...ast.Node) map[string]bool {
 	return out
 }
 
-// loadPackage parses and type-checks the package in dir: the files the
-// current build compiles, tests excluded.
-func loadPackage(dir string) (*typedPackage, error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
-		return nil, err
-	}
-	var paths []string
-	for _, e := range entries {
-		name := e.Name()
-		if e.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
-			continue
+// copiesAgree reports whether every copy of a run means what the first one
+// does. The copies are the same text, but the call gopls writes is worked
+// out from the first copy alone and pasted over the others, so it is right
+// for them only if each identifier refers to the same thing, or to a local of
+// the same type, and each copy's surroundings need the same results.
+//
+// On cc-connect the same text declared "opts" as a Feishu options struct in
+// one function and a Weixin one in the next, and a result the code after one
+// copy read was never read after another, where := then declared a variable
+// nothing used. Neither compiled.
+func copiesAgree(tp *typedPackage, occ []Occurrence) error {
+	idents := func(stmts []ast.Stmt) []*ast.Ident {
+		var out []*ast.Ident
+		for _, s := range stmts {
+			ast.Inspect(s, func(n ast.Node) bool {
+				if id, ok := n.(*ast.Ident); ok && id.Name != "_" {
+					out = append(out, id)
+				}
+				return true
+			})
 		}
-		if path := filepath.Join(dir, name); inCurrentBuild(path) {
-			paths = append(paths, path)
+		return out
+	}
+	object := func(id *ast.Ident) types.Object {
+		if o := tp.info.Uses[id]; o != nil {
+			return o
+		}
+		return tp.info.Defs[id]
+	}
+	local := func(o types.Object) bool {
+		v, ok := o.(*types.Var)
+		return ok && !v.IsField() && v.Parent() != nil && v.Parent() != tp.pkg.Scope()
+	}
+	first := idents(occ[0].stmts)
+	needs := func(o Occurrence, ids []*ast.Ident) map[int]bool {
+		out := map[int]bool{}
+		end := o.stmts[len(o.stmts)-1].End()
+		var outer *ast.FuncDecl
+		for _, d := range o.file.Decls {
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Pos() <= o.stmts[0].Pos() && end <= fn.End() {
+				outer = fn
+			}
+		}
+		for i, id := range ids {
+			obj := object(id)
+			if obj == nil || !local(obj) || obj.Parent() == nil {
+				continue
+			}
+			used, firstUse := usedIn(tp, end, obj.Parent().End(), obj)
+			if used && outer != nil && !overridden(tp.info, firstUse, obj, obj.Pos() < o.stmts[0].Pos(), outer) {
+				out[i] = true
+			}
+		}
+		return out
+	}
+	want := needs(occ[0], first)
+	for _, o := range occ[1:] {
+		other := idents(o.stmts)
+		if len(other) != len(first) {
+			return fmt.Errorf("the copies differ in shape")
+		}
+		for i := range first {
+			a, b := object(first[i]), object(other[i])
+			switch {
+			case (a == nil) != (b == nil):
+				return fmt.Errorf("%s resolves in one copy and not another", first[i].Name)
+			case a == nil:
+			case local(a) != local(b):
+				return fmt.Errorf("%s is local in one copy and not another", first[i].Name)
+			case local(a):
+				if !types.Identical(a.Type(), b.Type()) {
+					return fmt.Errorf("%s is %s in one copy and %s in another", first[i].Name, a.Type(), b.Type())
+				}
+				// x, err := f() declares err in one copy and reuses an err
+				// declared earlier in another; the := gopls writes for the
+				// first then declares nothing new at the second.
+				inA := occ[0].stmts[0].Pos() <= a.Pos() && a.Pos() < occ[0].stmts[len(occ[0].stmts)-1].End()
+				inB := o.stmts[0].Pos() <= b.Pos() && b.Pos() < o.stmts[len(o.stmts)-1].End()
+				if inA != inB {
+					return fmt.Errorf("%s is declared by the run in one copy and before it in another", first[i].Name)
+				}
+			case a != b:
+				return fmt.Errorf("%s refers to different things in the copies", first[i].Name)
+			}
+		}
+		got := needs(o, other)
+		for i := range first {
+			if want[i] != got[i] {
+				return fmt.Errorf("the code after the copies needs different results (%s)", first[i].Name)
+			}
 		}
 	}
-	tp, err := parsePackage(paths)
-	if err != nil {
-		return nil, err
-	}
-	if err := tp.check(dir); err != nil {
-		return nil, err
-	}
-	return tp, nil
+	return nil
 }
 
-// packages caches loadPackage for one detection pass.
-type packages map[string]*typedPackage
-
-func (ps packages) load(dir string) (*typedPackage, error) {
-	if tp, ok := ps[dir]; ok {
-		if tp == nil {
-			return nil, fmt.Errorf("%s does not type-check", dir)
-		}
-		return tp, nil
+// frameBound names a statement in the run whose meaning depends on the
+// function it runs in: a defer, or a call to recover. Function literals
+// inside the run have frames of their own and are not looked into.
+func frameBound(info *types.Info, stmts []ast.Stmt) string {
+	what := ""
+	for _, s := range stmts {
+		ast.Inspect(s, func(n ast.Node) bool {
+			if what != "" {
+				return false
+			}
+			switch n := n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.DeferStmt:
+				what = "a defer"
+			case *ast.CallExpr:
+				if id, ok := ast.Unparen(n.Fun).(*ast.Ident); ok {
+					if b, ok := info.Uses[id].(*types.Builtin); ok && b.Name() == "recover" {
+						what = "a call to recover"
+					}
+				}
+			}
+			return what == ""
+		})
 	}
-	tp, err := loadPackage(dir)
-	ps[dir] = tp
-	return tp, err
+	return what
 }

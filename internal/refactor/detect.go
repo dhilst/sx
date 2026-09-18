@@ -109,20 +109,108 @@ func Tool(name string) (string, bool) {
 // calls it, including through an interface - so this is not something a
 // file-at-a-time syntactic pass can answer honestly.
 func DeadCandidates(deadcodePath, dir string) ([]Candidate, error) {
+	return NewCache().Dead(deadcodePath, dir)
+}
+
+// deadReport is one function deadcode found unreachable.
+type deadReport struct {
+	file, name string
+}
+
+// Dead is DeadCandidates with deadcode's answer kept between passes.
+//
+// Nothing sx does makes an unreachable function reachable: removing code
+// cannot, inlining moves a body that was already reachable, and an
+// extraction's new function is called from where the code was. So the answer
+// stays true, less the functions that have gone since, and deadcode's
+// whole-program analysis - 13 seconds a pass on cc-connect - runs again only
+// after ForgetDead.
+func (c *Cache) Dead(deadcodePath, dir string) ([]Candidate, error) {
+	if !c.deadOK {
+		reports, err := runDeadcode(deadcodePath, dir)
+		if err != nil {
+			return nil, err
+		}
+		c.dead, c.deadOK = reports, true
+	}
+	var cands []Candidate
+	deadNames := map[string]map[string]bool{} // package directory -> dead function names
+	for _, r := range c.dead {
+		if deadNames[filepath.Dir(r.file)] == nil {
+			deadNames[filepath.Dir(r.file)] = map[string]bool{}
+		}
+		deadNames[filepath.Dir(r.file)][r.name] = true
+	}
+	for _, r := range c.dead {
+		file, name := r.file, r.name
+		if !within(dir, file) {
+			continue
+		}
+		if generated(file) {
+			continue // unreachable, but rewriting it would be undone anyway
+		}
+		tp, err := c.load(filepath.Dir(file))
+		if err != nil {
+			continue
+		}
+		f := tp.files[file]
+		if f == nil {
+			continue
+		}
+		var decl *ast.FuncDecl
+		for _, d := range f.Decls {
+			// A method cannot be removed by name: the removal matches plain
+			// functions, so proposing one only fails later.
+			if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && (cost.FuncName(fn) == name || fn.Name.Name == name) {
+				decl = fn
+			}
+		}
+		if decl == nil {
+			continue // gone since deadcode was asked
+		}
+		if calledByDead(tp, decl, deadNames[filepath.Dir(file)]) {
+			// Deleting a dead function another dead function still calls
+			// breaks the build until the caller goes too. Offer the caller
+			// first; this one becomes a root when it has gone.
+			continue
+		}
+		if namedInTests(filepath.Dir(file), decl.Name.Name) {
+			continue // the tests compile against it
+		}
+		model := Removal{
+			D: cost.Count(decl),
+			I: importDelta(tp, []*ast.File{f}, map[ast.Node]bool{decl: true}, nil),
+		}
+		cands = append(cands, Candidate{
+			Kind: KindDead, File: file, Line: tp.fset.Position(decl.Pos()).Line, Target: name,
+			Predicted: -model.Delta(), model: model,
+			Detail: fmt.Sprintf("%s is unreachable: %s", name, model),
+		})
+	}
+	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Predicted > cands[j].Predicted })
+	return cands, nil
+}
+
+// runDeadcode asks deadcode which functions the program cannot reach.
+//
+// Reachability is a question about the program, so it is asked from the
+// module root, where the main packages are; Dead narrows the answer to the
+// path. Asked from a subdirectory, deadcode would see no main package and no
+// roots.
+func runDeadcode(deadcodePath, dir string) ([]deadReport, error) {
+	root := ModuleRoot(dir)
 	cmd := exec.Command(deadcodePath, "./...")
-	cmd.Dir = dir
+	cmd.Dir = root
 	var out, errBuf bytes.Buffer
 	cmd.Stdout = &out
 	cmd.Stderr = &errBuf
 	if err := cmd.Run(); err != nil {
 		return nil, fmt.Errorf("deadcode: %w: %s", err, firstLine(errBuf.String()))
 	}
-
-	var cands []Candidate
-	ps := packages{}
+	var reports []deadReport
 	scanner := bufio.NewScanner(&out)
 	for scanner.Scan() {
-		file, line, name, ok := func(text string) (file string, line int, name string, ok bool) {
+		file, _, name, ok := func(text string) (file string, line int, name string, ok bool) {
 			const marker = "unreachable func: "
 			i := strings.Index(text, marker)
 			if i < 0 {
@@ -140,53 +228,27 @@ func DeadCandidates(deadcodePath, dir string) ([]Candidate, error) {
 			}
 			file = strings.Join(parts[:len(parts)-2], ":")
 			if !filepath.IsAbs(file) {
-				file = filepath.Join(dir, file)
+				file = filepath.Join(root, file)
 			}
 			return file, line, name, true
 		}(scanner.Text())
 		if !ok {
 			continue
 		}
-		if generated(file) {
-			continue // unreachable, but rewriting it would be undone anyway
-		}
-		tp, err := ps.load(filepath.Dir(file))
-		if err != nil {
-			continue
-		}
-		f := tp.files[file]
-		if f == nil {
-			continue
-		}
-		var decl *ast.FuncDecl
-		for _, d := range f.Decls {
-			// A method cannot be removed by name: the removal matches plain
-			// functions, so proposing one only fails later.
-			if fn, ok := d.(*ast.FuncDecl); ok && fn.Recv == nil && (cost.FuncName(fn) == name || fn.Name.Name == name) {
-				decl = fn
-			}
-		}
-		if decl == nil {
-			continue
-		}
-		model := Removal{
-			D: cost.Count(decl),
-			I: importDelta(tp, []*ast.File{f}, map[ast.Node]bool{decl: true}, nil),
-		}
-		cands = append(cands, Candidate{
-			Kind: KindDead, File: file, Line: line, Target: name,
-			Predicted: -model.Delta(), model: model,
-			Detail: fmt.Sprintf("%s is unreachable: %s", name, model),
-		})
+		reports = append(reports, deadReport{file, name})
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Predicted > cands[j].Predicted })
-	return cands, nil
+	return reports, nil
 }
 
 // InlineCandidates finds functions called exactly once in the package whose
 // inlining the model says shrinks the tree.
 func InlineCandidates(dir string) ([]Candidate, error) {
-	all, err := inlines(dir)
+	return NewCache().Inline(dir)
+}
+
+// Inline is InlineCandidates reusing what the cache already knows.
+func (c *Cache) Inline(dir string) ([]Candidate, error) {
+	all, err := c.inlines(dir)
 	if err != nil {
 		return nil, err
 	}
@@ -202,11 +264,50 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 
 // inlines is every function called exactly once in its package, with the
 // model's price on inlining it, including the ones that would grow the tree.
-func inlines(dir string) ([]Candidate, error) {
+func inlines(dir string) ([]Candidate, error) { return NewCache().inlines(dir) }
+
+func (c *Cache) inlines(dir string) ([]Candidate, error) {
 	files, err := goFilesIn(dir)
 	if err != nil {
 		return nil, err
 	}
+	// A test is a caller. Counting only the files that ship makes a helper the
+	// tests cover look called once, and inlining it deletes a declaration the
+	// tests still name - so the build fails, the change is reverted, and the
+	// same candidate is offered again on the next pass. Three of them cost
+	// about ten seconds a pass here before the tests were counted.
+	tests, err := testFilesIn(dir)
+	if err != nil {
+		return nil, err
+	}
+	// Everything below is keyed by package directory, so each package is
+	// worked out on its own and kept until it changes.
+	byDir := map[string][]string{}
+	for _, path := range append(files, tests...) {
+		byDir[filepath.Dir(path)] = append(byDir[filepath.Dir(path)], path)
+	}
+	var dirs []string
+	for d := range byDir {
+		if len(buildFiles(d)) > 0 {
+			dirs = append(dirs, d)
+		}
+	}
+	sort.Strings(dirs)
+	var out []Candidate
+	for _, d := range dirs {
+		cs, err := remember(c, d, "inline", byDir[d], func() ([]Candidate, error) {
+			return c.inlinesIn(byDir[d])
+		})
+		if err != nil {
+			continue
+		}
+		out = append(out, cs...)
+	}
+	return out, nil
+}
+
+// inlinesIn finds the candidates among one package's files, tests included.
+func (c *Cache) inlinesIn(paths []string) ([]Candidate, error) {
 	fset := token.NewFileSet()
 	type decl struct {
 		file  string
@@ -233,22 +334,13 @@ func inlines(dir string) ([]Candidate, error) {
 	refs := map[string]int{}
 	key := func(path, name string) string { return filepath.Dir(path) + "\x00" + name }
 
-	// A test is a caller. Counting only the files that ship makes a helper the
-	// tests cover look called once, and inlining it deletes a declaration the
-	// tests still name - so the build fails, the change is reverted, and the
-	// same candidate is offered again on the next pass. Three of them cost
-	// about ten seconds a pass here before the tests were counted.
-	tests, err := testFilesIn(dir)
-	if err != nil {
-		return nil, err
-	}
 	// Line ranges of functions carrying a compiler directive, per file. A
 	// //go:nosplit function has a fixed stack budget and no split check;
 	// moving a body into it is the one thing the directive forbids. internal/
 	// runtime/atomic has exactly this: panicUnaligned called once, from
 	// lockAndCheck, which is //go:nosplit.
 	directed := map[string][][2]int{}
-	for _, path := range append(append([]string{}, files...), tests...) {
+	for _, path := range paths {
 		f, err := parser.ParseFile(fset, path, nil, parser.ParseComments)
 		if err != nil {
 			continue
@@ -319,7 +411,6 @@ func inlines(dir string) ([]Candidate, error) {
 	}
 
 	var cands []Candidate
-	ps := packages{}
 	for k, d := range decls {
 		name := k[strings.IndexByte(k, 0)+1:]
 		if declared[k] > 1 {
@@ -363,7 +454,7 @@ func inlines(dir string) ([]Candidate, error) {
 		// signature, the call - less whatever the inliner adds at the call
 		// site to preserve behaviour. The model rebuilds that from the
 		// strategy gopls will choose.
-		tp, err := ps.load(filepath.Dir(d.file))
+		tp, err := c.load(filepath.Dir(d.file))
 		if err != nil {
 			continue
 		}
@@ -536,4 +627,70 @@ func firstLine(s string) string {
 		return "no reason given"
 	}
 	return s
+}
+
+// ModuleRoot is the directory of the module dir belongs to, or dir itself.
+func ModuleRoot(dir string) string {
+	cmd := exec.Command("go", "list", "-m", "-f", "{{.Dir}}")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if root := strings.TrimSpace(string(out)); err == nil && root != "" && !strings.Contains(root, "\n") {
+		return root
+	}
+	return dir
+}
+
+// within reports whether path is dir or lies under it.
+func within(dir, path string) bool {
+	rel, err := filepath.Rel(dir, path)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// calledByDead reports whether another function deadcode also reported
+// refers to decl.
+func calledByDead(tp *typedPackage, decl *ast.FuncDecl, dead map[string]bool) bool {
+	obj := tp.info.Defs[decl.Name]
+	if obj == nil {
+		return false
+	}
+	for _, f := range tp.files {
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn == decl || !dead[cost.FuncName(fn)] && !dead[fn.Name.Name] {
+				continue
+			}
+			if referenced(tp.info, fn, obj) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// namedInTests reports whether a test file in dir mentions name.
+func namedInTests(dir, name string) bool {
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return false
+	}
+	for _, e := range entries {
+		if !strings.HasSuffix(e.Name(), "_test.go") {
+			continue
+		}
+		f, err := parser.ParseFile(token.NewFileSet(), filepath.Join(dir, e.Name()), nil, parser.SkipObjectResolution)
+		if err != nil {
+			continue
+		}
+		found := false
+		ast.Inspect(f, func(n ast.Node) bool {
+			if id, ok := n.(*ast.Ident); ok && id.Name == name {
+				found = true
+			}
+			return !found
+		})
+		if found {
+			return true
+		}
+	}
+	return false
 }

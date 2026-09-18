@@ -7,7 +7,8 @@ import (
 	"go/ast"
 	"go/parser"
 	"go/token"
-	"path/filepath"
+	"io"
+	"reflect"
 	"sort"
 
 	"github.com/dhilst/sx/internal/cost"
@@ -69,129 +70,156 @@ func DuplicateCandidates(dir string) ([]Candidate, error) {
 
 // duplicates is every repeated run with the model's price on it, including
 // the ones it says would grow the tree.
-func duplicates(dir string) ([]Candidate, error) {
-	files, err := editableFilesIn(dir)
+func duplicates(dir string) ([]Candidate, error) { return NewCache().duplicates(dir) }
+
+// Duplicates is DuplicateCandidates reusing what the cache already knows.
+func (c *Cache) Duplicates(dir string) ([]Candidate, error) {
+	all, err := c.duplicates(dir)
 	if err != nil {
 		return nil, err
 	}
-	editable := map[string]bool{}
-	var dirs []string
-	for _, path := range files {
-		if !editable[filepath.Dir(path)] {
-			dirs = append(dirs, filepath.Dir(path))
+	var out []Candidate
+	for _, cand := range all {
+		if cand.Predicted > 0 {
+			out = append(out, cand)
 		}
-		editable[filepath.Dir(path)] = true
-		editable[path] = true
 	}
-	// Everything the build compiles in each package, generated files
-	// included: the type checker needs the whole package to answer.
-	all, err := goFilesIn(dir)
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
+	return maximal(out), nil
+}
+
+func (c *Cache) duplicates(dir string) ([]Candidate, error) {
+	dirs, err := packageDirs(dir)
 	if err != nil {
 		return nil, err
 	}
-	pkgFiles := map[string][]string{}
-	for _, path := range all {
-		if d := filepath.Dir(path); editable[d] && inCurrentBuild(path) {
-			pkgFiles[d] = append(pkgFiles[d], path)
+	var out []Candidate
+	for _, d := range dirs {
+		// Copies in different packages cannot share a function without
+		// exporting it and importing it, which is a bigger change than this
+		// makes and usually a worse one. So a candidate stays within one
+		// package, and each package is worked out on its own and kept until
+		// it changes.
+		cs, err := remember(c, d, "dedup", nil, func() ([]Candidate, error) {
+			return c.duplicatesIn(d)
+		})
+		if err != nil {
+			continue
+		}
+		out = append(out, cs...)
+	}
+	return out, nil
+}
+
+// duplicatesIn finds the repeated runs in one package.
+func (c *Cache) duplicatesIn(dir string) ([]Candidate, error) {
+	tp, err := c.syntax(dir)
+	if err != nil {
+		return nil, err
+	}
+	var paths []string
+	for path := range tp.files {
+		if !generated(path) {
+			paths = append(paths, path)
 		}
 	}
+	sort.Strings(paths)
 
 	type run struct {
 		occ   []Occurrence
 		nodes int
 	}
+	runs := map[[sha256.Size]byte]*run{}
+	fset := tp.fset
+	for _, path := range paths {
+		f := tp.files[path]
+		ast.Inspect(f, func(n ast.Node) bool {
+			var list []ast.Stmt
+			switch s := n.(type) {
+			case *ast.BlockStmt:
+				list = s.List
+			case *ast.CaseClause:
+				list = s.Body
+			default:
+				return true
+			}
+			if len(list) < 2 {
+				return true
+			}
+			// Each statement is hashed and counted once; a run's hash and
+			// size are made from its statements'. Hashing every run from
+			// scratch walked each statement once per run containing it.
+			digests := make([][sha256.Size]byte, len(list))
+			sizes := make([]int, len(list)+1)
+			for i, st := range list {
+				digests[i] = stmtDigest(st)
+				sizes[i+1] = sizes[i] + cost.Count(st)
+			}
+			for i := 0; i < len(list); i++ {
+				for j := i + 2; j <= len(list); j++ {
+					nodes := sizes[j] - sizes[i]
+					if nodes < minDuplicateNodes {
+						continue
+					}
+					h := runDigest(digests[i:j])
+					if runs[h] == nil {
+						runs[h] = &run{nodes: nodes}
+					}
+					seq := list[i:j]
+					start := fset.Position(seq[0].Pos())
+					end := fset.Position(seq[len(seq)-1].End())
+					runs[h].occ = append(runs[h].occ, Occurrence{
+						File: path, StartLine: start.Line, StartCol: start.Column,
+						EndLine: end.Line, EndCol: end.Column, Stmts: len(seq),
+						StartOffset: start.Offset, EndOffset: end.Offset,
+						stmts: seq, file: f,
+					})
+				}
+			}
+			return true
+		})
+	}
+
 	var out []Candidate
-	for _, d := range dirs {
-		tp, err := parsePackage(pkgFiles[d])
+	var typed *typedPackage
+	for h, r := range runs {
+		d := len(r.occ)
+		// The declaration costs at least five nodes and each call at least
+		// three; below that nothing is worth type-checking for.
+		if d < 2 || overlaps(r.occ) || 5+3*d-(d-1)*r.nodes >= 0 {
+			continue
+		}
+		sort.SliceStable(r.occ, func(i, j int) bool {
+			if r.occ[i].File != r.occ[j].File {
+				return r.occ[i].File < r.occ[j].File
+			}
+			return r.occ[i].StartLine < r.occ[j].StartLine
+		})
+		if typed == nil {
+			if typed, err = c.load(dir); err != nil {
+				return nil, nil
+			}
+		}
+		var copies []*ast.File
+		for _, o := range r.occ {
+			copies = append(copies, o.file)
+		}
+		// gopls extracts the first copy; the call it writes there is what
+		// every other copy becomes.
+		model, err := predictExtraction(typed, r.occ[0].file, r.occ[0].stmts, d, copies)
 		if err != nil {
 			continue
 		}
-		runs := map[string]*run{}
-		for _, path := range pkgFiles[d] {
-			if !editable[path] {
-				continue
-			}
-			f := tp.files[path]
-			fset := tp.fset
-			ast.Inspect(f, func(n ast.Node) bool {
-				var list []ast.Stmt
-				switch s := n.(type) {
-				case *ast.BlockStmt:
-					list = s.List
-				case *ast.CaseClause:
-					list = s.Body
-				default:
-					return true
-				}
-				for i := 0; i < len(list); i++ {
-					for j := i + 2; j <= len(list); j++ {
-						seq := list[i:j]
-						nodes := 0
-						for _, s := range seq {
-							nodes += cost.Count(s)
-						}
-						if nodes < minDuplicateNodes {
-							continue
-						}
-						start := fset.Position(seq[0].Pos())
-						end := fset.Position(seq[len(seq)-1].End())
-						// Copies in different packages cannot share a
-						// function without exporting it and importing it,
-						// which is a bigger change than this makes and
-						// usually a worse one. Grouping per directory keeps
-						// a candidate to one package.
-						h := hashRun(seq)
-						if runs[h] == nil {
-							runs[h] = &run{nodes: nodes}
-						}
-						runs[h].occ = append(runs[h].occ, Occurrence{
-							File: path, StartLine: start.Line, StartCol: start.Column,
-							EndLine: end.Line, EndCol: end.Column, Stmts: len(seq),
-							StartOffset: start.Offset, EndOffset: end.Offset,
-							stmts: seq, file: f,
-						})
-					}
-				}
-				return true
-			})
+		if copiesAgree(typed, r.occ) != nil {
+			continue
 		}
-		checked := false
-		for hash, r := range runs {
-			d := len(r.occ)
-			// The declaration costs at least five nodes and each call at
-			// least three; below that nothing is worth type-checking for.
-			if d < 2 || overlaps(r.occ) || 5+3*d-(d-1)*r.nodes >= 0 {
-				continue
-			}
-			sort.SliceStable(r.occ, func(i, j int) bool {
-				if r.occ[i].File != r.occ[j].File {
-					return r.occ[i].File < r.occ[j].File
-				}
-				return r.occ[i].StartLine < r.occ[j].StartLine
-			})
-			if !checked {
-				checked = true
-				if err := tp.check(filepath.Dir(r.occ[0].File)); err != nil {
-					break
-				}
-			}
-			var copies []*ast.File
-			for _, o := range r.occ {
-				copies = append(copies, o.file)
-			}
-			// gopls extracts the first copy; the call it writes there is
-			// what every other copy becomes.
-			model, err := predictExtraction(tp, r.occ[0].file, r.occ[0].stmts, d, copies)
-			if err != nil {
-				continue
-			}
-			out = append(out, Candidate{
-				Kind: KindDuplicate, File: r.occ[0].File, Line: r.occ[0].StartLine,
-				Col: r.occ[0].StartCol, Target: "dup:" + hash[:8], Predicted: -model.Delta(),
-				Occurrences: r.occ, Hash: hash, model: model,
-				Detail: fmt.Sprintf("%d identical copies of %d nodes: %s", d, r.nodes, model),
-			})
-		}
+		hash := hex.EncodeToString(h[:])
+		out = append(out, Candidate{
+			Kind: KindDuplicate, File: r.occ[0].File, Line: r.occ[0].StartLine,
+			Col: r.occ[0].StartCol, Target: "dup:" + hash[:8], Predicted: -model.Delta(),
+			Occurrences: r.occ, Hash: hash, model: model,
+			Detail: fmt.Sprintf("%d identical copies of %d nodes: %s", d, r.nodes, model),
+		})
 	}
 	return out, nil
 }
@@ -281,21 +309,65 @@ func FindRuns(path, hash string) ([]Occurrence, error) {
 }
 
 func hashRun(seq []ast.Stmt) string {
-	h := sha256.New()
-	for _, s := range seq {
-		ast.Inspect(s, func(n ast.Node) bool {
-			if n == nil {
-				return false
-			}
-			fmt.Fprintf(h, "%T;", n)
-			switch x := n.(type) {
-			case *ast.Ident:
-				fmt.Fprintf(h, "id=%s;", x.Name)
-			case *ast.BasicLit:
-				fmt.Fprintf(h, "lit=%s;", x.Value)
-			}
-			return true
-		})
+	digests := make([][sha256.Size]byte, len(seq))
+	for i, st := range seq {
+		digests[i] = stmtDigest(st)
 	}
-	return hex.EncodeToString(h.Sum(nil))
+	h := runDigest(digests)
+	return hex.EncodeToString(h[:])
+}
+
+// stmtDigest identifies a statement by its structure, its identifiers and
+// literals, and every token that is not a position: the operator in x += n,
+// break or continue, the arrow of a channel type, the ... of a variadic call.
+//
+// It used to hash node types, identifiers and literals only. "count += n" and
+// "count -= n" were then the same statement, the detector reported two runs
+// differing in that line as copies, and the extraction replaced one with the
+// other: it compiled, the tests had no case for it, and the tree got smaller.
+func stmtDigest(s ast.Stmt) [sha256.Size]byte {
+	h := sha256.New()
+	ast.Inspect(s, func(n ast.Node) bool {
+		if n == nil {
+			return false
+		}
+		writeNode(h, n)
+		return true
+	})
+	var d [sha256.Size]byte
+	copy(d[:], h.Sum(nil))
+	return d
+}
+
+var posType = reflect.TypeOf(token.NoPos)
+
+// writeNode writes a node's type and its own non-node fields. Positions are
+// left out, except a variadic call's ..., which changes what the call means.
+func writeNode(w io.Writer, n ast.Node) {
+	v := reflect.ValueOf(n).Elem()
+	t := v.Type()
+	io.WriteString(w, t.Name())
+	for i := 0; i < t.NumField(); i++ {
+		f, fv := t.Field(i), v.Field(i)
+		switch {
+		case f.Type == posType:
+			if call, ok := n.(*ast.CallExpr); ok && f.Name == "Ellipsis" {
+				fmt.Fprintf(w, "|...=%t", call.Ellipsis.IsValid())
+			}
+		case fv.Kind() == reflect.String, fv.Kind() == reflect.Bool, fv.Kind() == reflect.Int:
+			fmt.Fprintf(w, "|%s=%v", f.Name, fv.Interface())
+		}
+	}
+	io.WriteString(w, ";")
+}
+
+// runDigest identifies a run of statements by theirs.
+func runDigest(digests [][sha256.Size]byte) [sha256.Size]byte {
+	h := sha256.New()
+	for _, d := range digests {
+		h.Write(d[:])
+	}
+	var out [sha256.Size]byte
+	copy(out[:], h.Sum(nil))
+	return out
 }

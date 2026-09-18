@@ -19,32 +19,44 @@ Use one command shape across Codex-style skill invocation and slash-command
 clients:
 
 ```text
-{$|/}sx <cmd> [param]
+{$|/}sx <cmd> [params]
 ```
 
 Commands:
 
-- `min [auto|all]`: minimize the current Go repository. Default is `auto`.
-- `bake [path]`: create `eg` examples. Default path is `sx/examples/eg`.
+- `min [auto|all] [path]`: minimize the current Go repository, or only the code
+  under `path`. Default mode is `auto`; default path is the repository root.
+- `bake [dest] [src]`: create `eg` examples from the code under `src` and write
+  them to `dest`. Default `dest` is `sx/examples/eg`; default `src` is the
+  repository root.
+
+A single parameter after `min` is the mode if it is `auto` or `all`, and the
+path otherwise. A single parameter after `bake` is `dest`.
 
 Examples:
 
 ```text
 $sx min auto
 $sx min all
+$sx min ./internal/storage
+$sx min auto ./internal/storage
 $sx bake
 $sx bake ./examples/eg
-/sx min auto
-/sx bake ./examples/eg
+$sx bake ./examples/eg ./internal
+/sx min auto ./internal/storage
+/sx bake ./examples/eg ./internal
 ```
 
 Legacy spellings such as `/sx:min` and `/sx:bake` mean the same thing when a
 client exposes them.
 
-## sx min [all|auto]
+## sx min [auto|all] [path]
 
-Minimize the current Go repository in a temporary git worktree, then review the
-result with the user.
+Minimize the current Go repository, or only the code under `path`, in a
+temporary git worktree, then review the result with the user. `path` is relative
+to the repository root. Only code under it is changed, and the tests `sx` runs
+after each change cover every package under `path` and every package in the
+module that imports one of them.
 
 Modes:
 
@@ -94,17 +106,22 @@ Procedure:
    go install golang.org/x/tools/cmd/eg@latest
    ```
 
-6. Run minimization inside the worktree:
+6. Run minimization inside the worktree, on `path` (`.` when none was given):
 
    ```bash
-   go tool sx refactor -apply -n 100 "$tmp/worktree"
+   go tool sx refactor -apply -n 100 "$tmp/worktree/$path"
    ```
 
    If using an installed binary:
 
    ```bash
-   sx refactor -apply -n 100 "$tmp/worktree"
+   sx refactor -apply -n 100 "$tmp/worktree/$path"
    ```
+
+   If the build needs files that are not committed (frontend assets under
+   `//go:embed`, generated code), create them in the worktree first, or every
+   change is reverted as "stopped building". `sx` prints the compiler's first
+   error when it reverts one.
 
 7. Run the project test command in the worktree. Prefer the repository's
    documented test command. Use `go test ./...` when no stronger local command
@@ -122,21 +139,18 @@ Procedure:
 
 Never add a co-author trailer unless the user explicitly asks for one.
 
-## sx bake [path]
+## sx bake [dest] [src]
 
-Create `eg` examples from recurring expressions in the current codebase. These
-rules are ordinary Go files that `sx refactor -eg <path>` can try later.
+Create `eg` examples from recurring expressions in the current codebase, or in
+the code under `src`. These rules are ordinary Go files that
+`sx refactor -eg <dest>` can try later.
 
-Default path:
-
-```text
-sx/examples/eg
-```
+Defaults: `dest` is `sx/examples/eg`, `src` is the repository root.
 
 Procedure:
 
-1. Use the provided path, or `sx/examples/eg` if no path is provided.
-2. Inspect the Go codebase for repeated expression forms where a larger
+1. Use the provided `dest` and `src`, or their defaults.
+2. Inspect the Go code under `src` for repeated expression forms where a larger
    expression can be replaced by a smaller equivalent expression.
 3. Write each candidate as an `eg` template:
 
@@ -151,13 +165,14 @@ Procedure:
 
 4. Prefer examples that do not duplicate, remove, or reorder wildcard
    expressions with side effects.
-5. Run `go tool sx refactor -check -eg <path> .` or the local equivalent to
+5. Run `go tool sx refactor -check -eg <dest> <src>` or the local equivalent to
    confirm the examples are valid and can be evaluated.
 6. Keep only templates that parse, type-check under `eg`, and reduce AST size
    when they match.
 
-The default minimization command searches `examples/eg` and `sx/examples/eg`, so
-examples baked to the default path are picked up by later `sx min` runs.
+The default minimization command searches `examples/eg` and `sx/examples/eg`,
+both under the path being minimized, its module root, and the repository root, so examples baked
+to the default `dest` are picked up by later `sx min` runs.
 
 ## Adding eg rules by hand
 

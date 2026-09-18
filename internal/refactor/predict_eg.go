@@ -8,6 +8,7 @@ import (
 	"go/types"
 	"path/filepath"
 	"reflect"
+	"sort"
 	"strconv"
 
 	"github.com/dhilst/sx/internal/cost"
@@ -125,26 +126,81 @@ func (t *template) occurrences(e ast.Expr) map[string]int {
 }
 
 // predictEg prices applying one template to every file under dir that the
-// measure counts.
-func predictEg(ps packages, dir, templatePath string) (Rewrite, error) {
+// measure counts, and names the first file with a match.
+//
+// Matches are found by the model's own matcher rather than by running eg,
+// which type-checks the whole program from source on every call: once per
+// template per pass, 55 of the 88 seconds of a pass on cc-connect. A package
+// is only type-checked when it names every identifier the pattern does, and
+// what was found in it is kept until it changes.
+func predictEg(c *Cache, dir, templatePath string) (Rewrite, string, error) {
 	t, err := readTemplate(templatePath)
 	if err != nil {
-		return Rewrite{}, err
+		return Rewrite{}, "", err
 	}
 	m := Rewrite{P: cost.Count(t.after) - cost.Count(t.before)}
-	b, a := t.occurrences(t.before), t.occurrences(t.after)
-	files, err := goFilesIn(dir)
+	var needs []string // identifiers every match contains
+	ast.Inspect(t.before, func(n ast.Node) bool {
+		if id, ok := n.(*ast.Ident); ok {
+			if _, wild := t.wild[id.Name]; !wild {
+				needs = append(needs, id.Name)
+			}
+		}
+		return true
+	})
+	dirs, err := packageDirs(dir)
 	if err != nil {
-		return m, err
+		return m, "", err
 	}
-	for _, path := range files {
-		if !inCurrentBuild(path) {
+	first := ""
+	for _, d := range dirs {
+		ids := c.identifiers(d)
+		missing := false
+		for _, n := range needs {
+			if !ids[n] {
+				missing = true
+				break
+			}
+		}
+		if missing {
 			continue
 		}
-		tp, err := ps.load(filepath.Dir(path))
+		type found struct {
+			m     Rewrite
+			first string
+		}
+		r, err := remember(c, d, "eg", []string{templatePath}, func() (found, error) {
+			tp, err := c.load(d)
+			if err != nil {
+				return found{}, nil
+			}
+			r, first, err := t.rewrite(tp)
+			return found{r, first}, err
+		})
 		if err != nil {
-			continue
+			return m, "", err
 		}
+		m.Matches += r.m.Matches
+		m.W += r.m.W
+		m.I += r.m.I
+		if first == "" {
+			first = r.first
+		}
+	}
+	return m, first, nil
+}
+
+// rewrite prices the template over one package.
+func (t *template) rewrite(tp *typedPackage) (Rewrite, string, error) {
+	var m Rewrite
+	b, a := t.occurrences(t.before), t.occurrences(t.after)
+	var paths []string
+	for path := range tp.files {
+		paths = append(paths, path)
+	}
+	sort.Strings(paths)
+	first := ""
+	for _, path := range paths {
 		f := tp.files[path]
 		gone := map[ast.Node]bool{}
 		arrived := map[string]bool{}
@@ -158,6 +214,7 @@ func predictEg(ps packages, dir, templatePath string) (Rewrite, error) {
 			}
 			return true
 		})
+		var err error
 		ast.Inspect(f, func(n ast.Node) bool {
 			e, ok := n.(ast.Expr)
 			if !ok {
@@ -183,13 +240,16 @@ func predictEg(ps packages, dir, templatePath string) (Rewrite, error) {
 			return false
 		})
 		if err != nil {
-			return m, err
+			return m, "", err
 		}
 		if len(gone) > 0 {
+			if first == "" {
+				first = path
+			}
 			m.I += importDelta(tp, []*ast.File{f}, gone, map[*ast.File]map[string]bool{f: arrived})
 		}
 	}
-	return m, nil
+	return m, first, nil
 }
 
 // match reports whether the code expression x matches the pattern p,
@@ -238,7 +298,7 @@ func (t *template) match(tp *typedPackage, p ast.Node, x ast.Node, bind map[stri
 		}
 	}
 	pv, xv := reflect.ValueOf(p), reflect.ValueOf(x)
-	if pv.Type() != xv.Type() {
+	if pv.Type() != xv.Type() || !sameVariadic(p, x) {
 		return false
 	}
 	return t.matchValue(tp, pv.Elem(), xv.Elem(), bind)
@@ -282,6 +342,17 @@ func skipField(f reflect.StructField) bool {
 		return true
 	}
 	return false
+}
+
+// sameVariadic reports whether two calls agree on the ..., a position the
+// matcher otherwise skips: f(xs...) is not f(xs).
+func sameVariadic(p, x ast.Node) bool {
+	pc, ok := p.(*ast.CallExpr)
+	if !ok {
+		return true
+	}
+	xc, ok := x.(*ast.CallExpr)
+	return ok && pc.Ellipsis.IsValid() == xc.Ellipsis.IsValid()
 }
 
 // equalNodes is structural equality, positions aside.

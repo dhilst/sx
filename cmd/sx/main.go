@@ -16,8 +16,14 @@ import (
 	"io"
 	"io/fs"
 	"os"
+	"os/exec"
+	"os/signal"
 	"path/filepath"
+	"runtime/pprof"
+	"sort"
 	"strings"
+	"sync"
+	"syscall"
 	"time"
 
 	"github.com/dhilst/sx/internal/cost"
@@ -41,6 +47,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		check := fs.Bool("check", false, "exit non-zero at the first shrinking candidate; never writes to the tree")
 		rounds := fs.Int("n", 10, "how many changes to attempt")
 		runTests := fs.Bool("test", true, "run the tests after each change and revert if they fail")
+		cpuprofile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
 		fs.Var(&egPaths, "eg", "file or directory of eg templates; repeat or separate with commas/path-list separators (empty disables eg)")
 		if err := fs.Parse(args); err != nil {
 			return err
@@ -49,6 +56,17 @@ func run(args []string, stdout, stderr io.Writer) error {
 		// but writing to it. Honouring either one silently breaks the other.
 		if *check && *apply {
 			return fmt.Errorf("-check and -apply cannot be combined: -check never writes files")
+		}
+		if *cpuprofile != "" {
+			f, err := os.Create(*cpuprofile)
+			if err != nil {
+				return err
+			}
+			defer f.Close()
+			if err := pprof.StartCPUProfile(f); err != nil {
+				return err
+			}
+			defer pprof.StopCPUProfile()
 		}
 		dir := "."
 		if fs.NArg() > 0 {
@@ -61,7 +79,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 		deadcodePath, hasDeadcode := refactor.Tool("deadcode")
 		goplsPath, hasGopls := refactor.Tool("gopls")
 		egPath, hasEg := refactor.Tool("eg")
-		egTemplates, err := refactor.EgTemplates(egPaths.Values([]string{"examples/eg", "sx/examples/eg"}))
+		// Templates are looked for next to the code being minimized - the
+		// path, its module, and its repository, where /sx bake writes them
+		// by default - as well as where sx is run from.
+		var defaults []string
+		for _, base := range []string{dir, refactor.ModuleRoot(dir), repoRoot(dir), "."} {
+			defaults = append(defaults, filepath.Join(base, "examples", "eg"), filepath.Join(base, "sx", "examples", "eg"))
+		}
+		egTemplates, err := refactor.EgTemplates(egPaths.Values(defaults))
 		if err != nil {
 			return err
 		}
@@ -86,34 +111,92 @@ func run(args []string, stdout, stderr io.Writer) error {
 		// package and everything that imports it, worked out once: these
 		// transformations do not add imports, so the set does not move.
 		scope := refactor.TestScope(dir)
-		if n := len(scope.Packages()); n > 1 {
-			fmt.Fprintf(stdout, "  (testing %d packages: %s and the %d that import it)\n",
-				n, scope.Packages()[0], n-1)
+		if n := len(scope.Packages()); scope.Targets() > 0 {
+			fmt.Fprintf(stdout, "  (testing %d packages: the %d under %s and the %d that import them)\n",
+				n, scope.Targets(), dir, n-scope.Targets())
 		}
+
+		// What already fails before the first change is not the change's
+		// doing: it is skipped, and the gate asks only for new failures.
+		var baseline refactor.Failures
+		if *apply && *runTests {
+			start := time.Now()
+			baseline, err = scope.Failures(nil)
+			if err != nil {
+				return err
+			}
+			if len(baseline) > 0 {
+				var names []string
+				for k := range baseline {
+					pkg, test, _ := strings.Cut(k, "\x00")
+					names = append(names, strings.TrimSpace(pkg+" "+test))
+				}
+				sort.Strings(names)
+				fmt.Fprintf(stdout, "  (%d already failing before any change, skipped from now on: %s) %s\n",
+					len(names), strings.Join(names, ", "), round(time.Since(start)))
+			}
+		}
+
+		// An interrupted run stops its tests and puts back a change it had
+		// not finished judging, instead of leaving one on disk that nothing
+		// decided to keep.
+		var pending func() error
+		var pendingMu sync.Mutex
+		interrupt := make(chan os.Signal, 1)
+		signal.Notify(interrupt, os.Interrupt, syscall.SIGTERM)
+		defer signal.Stop(interrupt)
+		go func() {
+			if _, ok := <-interrupt; !ok {
+				return
+			}
+			refactor.StopTests()
+			pendingMu.Lock()
+			if pending != nil {
+				pending()
+				fmt.Fprintln(stderr, "sx: interrupted; the change in progress was reverted")
+			}
+			os.Exit(130)
+		}()
 
 		tried := map[string]bool{}
 		applied, attempted := 0, 0
+		// One cache for the run: a package is re-read only when it, or what it
+		// imports, changed since the last pass.
+		cache := refactor.NewCache()
+		// Where the time goes, per detector, summed over the run.
+		spent := map[string]time.Duration{}
+		timed := func(name string, f func()) {
+			start := time.Now()
+			f()
+			spent[name] += time.Since(start)
+		}
+		defer func() {
+			var parts []string
+			for _, name := range []string{"load", "dead", "inline", "dedup", "eg", "apply+gate"} {
+				if d, ok := spent[name]; ok {
+					parts = append(parts, fmt.Sprintf("%s %s", name, round(d)))
+				}
+			}
+			fmt.Fprintf(stdout, "time: %s\n", strings.Join(parts, ", "))
+		}()
 		for attempted < *rounds {
-			c, ok := func() (refactor.Candidate, bool) {
-				var dir string = dir
+			detect := func() (refactor.Candidate, bool) {
 				var all []refactor.Candidate
-				if hasDeadcode {
-					if cs, err := refactor.DeadCandidates(deadcodePath, dir); err == nil {
+				timed("load", func() { cache.Begin(dir) })
+				add := func(cs []refactor.Candidate, err error) {
+					if err == nil {
 						all = append(all, cs...)
 					}
+				}
+				if hasDeadcode {
+					timed("dead", func() { add(cache.Dead(deadcodePath, dir)) })
 				}
 				if hasGopls {
-					if cs, err := refactor.InlineCandidates(dir); err == nil {
-						all = append(all, cs...)
-					}
-					if cs, err := refactor.DuplicateCandidates(dir); err == nil {
-						all = append(all, cs...)
-					}
+					timed("inline", func() { add(cache.Inline(dir)) })
+					timed("dedup", func() { add(cache.Duplicates(dir)) })
 				}
 				if hasEg && len(egTemplates) > 0 {
-					if cs, err := refactor.EgCandidates(egPath, dir, egTemplates); err == nil {
-						all = append(all, cs...)
-					}
+					timed("eg", func() { add(cache.Eg(dir, egTemplates)) })
 				}
 				best, found := refactor.Candidate{}, false
 				for _, c := range all {
@@ -125,7 +208,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 					}
 				}
 				return best, found
-			}()
+			}
+			c, ok := detect()
+			if !ok && hasDeadcode {
+				// deadcode's answer is kept between passes; ask it again
+				// before concluding there is nothing left.
+				cache.ForgetDead()
+				c, ok = detect()
+			}
 			if !ok {
 				fmt.Fprintln(stdout, "\nnothing left that the measure says will shrink it")
 				break
@@ -155,8 +245,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 			if err != nil {
 				return err
 			}
+			pendingMu.Lock()
 			revert, err := refactor.Apply(dir, c, goplsPath, egPath)
+			if err == nil {
+				pending = revert
+			}
+			pendingMu.Unlock()
 			if err != nil {
+				spent["apply+gate"] += time.Since(start)
 				fmt.Fprintf(stdout, "  %-2d %7s  skipped  %s %s  %v\n", attempted, round(time.Since(start)), c.Kind, c.Target, err)
 				continue
 			}
@@ -169,27 +265,35 @@ func run(args []string, stdout, stderr io.Writer) error {
 				}
 				return err
 			}
-			builds, repairErr := refactor.Repair(dir)
-			repaired := ""
-			if builds && repairErr == nil {
-				if problems, _ := refactor.Build(dir); len(problems) == 0 {
-					repaired = ""
+			builds, _ := refactor.Repair(dir)
+			why := ""
+			if !builds {
+				if problems, _ := refactor.Build(dir); len(problems) > 0 {
+					p := problems[0]
+					if r, err := filepath.Rel(dir, p.File); err == nil {
+						p.File = r
+					}
+					why = fmt.Sprintf(": %s:%d: %s", p.File, p.Line, p.Message)
 				}
 			}
 			after, scoreErr := scoreTree(dir)
 			var testErr error
 			if *runTests && scoreErr == nil && builds {
-				testErr = scope.Test()
+				var failures refactor.Failures
+				if failures, testErr = scope.Failures(baseline); testErr == nil {
+					testErr = failures.Since(baseline)
+				}
 			}
+			spent["apply+gate"] += time.Since(start)
 			elapsed := round(time.Since(start))
 			switch {
 			case scoreErr != nil || !builds:
-				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the package stopped building%s\n", attempted, elapsed, c.Kind, c.Target, repaired)
+				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the package stopped building%s\n", attempted, elapsed, c.Kind, c.Target, why)
 				if err := revert(); err != nil {
 					return err
 				}
 			case testErr != nil:
-				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the tests failed\n", attempted, elapsed, c.Kind, c.Target)
+				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the tests failed: %v\n", attempted, elapsed, c.Kind, c.Target, testErr)
 				if err := revert(); err != nil {
 					return err
 				}
@@ -203,6 +307,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 				before = after
 				applied++
 			}
+			pendingMu.Lock()
+			pending = nil
+			pendingMu.Unlock()
 		}
 		fmt.Fprintf(stdout, "\n%d nodes after %d changes in %d attempts\n", before, applied, attempted)
 		return nil
@@ -336,4 +443,15 @@ func (p *pathListFlag) Values(defaults []string) []string {
 		return append([]string(nil), p.values...)
 	}
 	return append([]string(nil), defaults...)
+}
+
+// repoRoot is the top of the git repository dir is in, or dir itself.
+func repoRoot(dir string) string {
+	cmd := exec.Command("git", "rev-parse", "--show-toplevel")
+	cmd.Dir = dir
+	out, err := cmd.Output()
+	if root := strings.TrimSpace(string(out)); err == nil && root != "" {
+		return root
+	}
+	return dir
 }

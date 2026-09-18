@@ -66,11 +66,18 @@ func ScoreFile(path string) (File, error) {
 	return out, nil
 }
 
-// Count is the measure: how many AST nodes this subtree takes.
+// Count is the measure: how many AST nodes this subtree takes. Comments are
+// not code, and are not counted even when the file was parsed with them: a
+// declaration's doc comment once made a model count thirty lines of prose as
+// nodes the change would remove.
 func Count(n ast.Node) int {
 	total := 0
 	ast.Inspect(n, func(node ast.Node) bool {
-		if node != nil {
+		switch node.(type) {
+		case nil:
+		case *ast.CommentGroup, *ast.Comment:
+			return false
+		default:
 			total++
 		}
 		return true

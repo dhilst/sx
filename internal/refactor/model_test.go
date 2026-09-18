@@ -146,7 +146,7 @@ func kinds(t *testing.T) map[string]func(dir string) ([]Candidate, error) {
 					templates[i] = abs
 				}
 			}
-			return egRewrites(tools["eg"], dir, templates)
+			return NewCache().egRewrites(dir, templates)
 		},
 	}
 }
@@ -211,6 +211,10 @@ func TestExtractionModelRefuses(t *testing.T) {
 		"dedup_free_branch":    {"continue", ""},
 		"dedup_loop_carried":   {"prev = x", "prev := 0"},
 		"dedup_generic":        {"first", ""},
+		"dedup_types_differ":   {"opts.token", ""},
+		"dedup_defer":          {"defer mu.Unlock()", ""},
+		"dedup_redeclared":     {"n, err := strconv.Atoi(s)", ""},
+		"dedup_results_differ": {"body := strings.TrimSpace(s)", ""},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := exampleModule(t, name)

@@ -1,6 +1,8 @@
 package cost
 
 import (
+	"go/parser"
+	"go/token"
 	"os"
 	"path/filepath"
 	"testing"
@@ -95,5 +97,22 @@ func TestPrimitivesMoveTheMeasure(t *testing.T) {
 				t.Errorf("%s was expected to cost nodes, got %d -> %d", c.name, before, after)
 			}
 		})
+	}
+}
+
+// Comments are not code. A file parsed with its comments measures the same as
+// one parsed without them.
+func TestCommentsParsedWithTheFileAreNotCounted(t *testing.T) {
+	src := "package p\n\n// F does\n// something.\nfunc F() int {\n\t// one\n\treturn 1 // two\n}\n"
+	with, err := parser.ParseFile(token.NewFileSet(), "p.go", src, parser.ParseComments)
+	if err != nil {
+		t.Fatal(err)
+	}
+	without, err := parser.ParseFile(token.NewFileSet(), "p.go", src, 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a, b := Count(with), Count(without); a != b {
+		t.Fatalf("with comments %d nodes, without %d", a, b)
 	}
 }

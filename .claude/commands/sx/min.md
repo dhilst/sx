@@ -1,16 +1,27 @@
-# /sx min [all|auto]
+# /sx min [auto|all] [path]
 
-Minimize the current Go repository with `sx` in a temporary git worktree, then
-review and apply accepted changes.
+Minimize the current Go repository, or only the code under `path`, with `sx` in
+a temporary git worktree, then review and apply accepted changes.
 
 Canonical invocation:
 
 ```text
 /sx min auto
 /sx min all
+/sx min auto ./internal/storage
+/sx min ./internal/storage
 ```
 
-Legacy `/sx:min [all|auto]` means the same thing when supported by the client.
+Legacy `/sx:min [auto|all] [path]` means the same thing when supported by the
+client.
+
+Parameters:
+
+- The first parameter is the mode if it is `auto` or `all`; otherwise it is the
+  path and the mode is `auto`.
+- `path` is relative to the repository root and defaults to the root. Only code
+  under it is changed. The tests `sx` runs after each change cover every package
+  under `path` and every package in the module that imports one of them.
 
 Modes:
 
@@ -61,19 +72,25 @@ Steps:
    go install golang.org/x/tools/cmd/eg@latest
    ```
 
-5. Run `sx` in the worktree. If the repository declares `sx` as a tool
-   dependency in `go.mod`, which is the preferred setup:
+5. Run `sx` in the worktree, on `path` inside it (`.` when no path was
+   given). If the repository declares `sx` as a tool dependency in `go.mod`,
+   which is the preferred setup:
 
    ```bash
-   go tool sx refactor -apply -n 100 "$tmp/worktree"
+   go tool sx refactor -apply -n 100 "$tmp/worktree/$path"
    ```
+
+   If the build needs generated or downloaded files that are not committed
+   (frontend assets under `//go:embed`, generated code), create them in the
+   worktree first, or the gate reverts every change as "stopped building".
+   `sx` prints the compiler's first error when it reverts one.
 
    Add it with `go get -tool github.com/dhilst/sx/cmd/sx` if it is missing and
    the user agrees to the go.mod change. Inside the `sx` source tree
    `go run ./cmd/sx` is equivalent. Otherwise fall back to an installed command:
 
    ```bash
-   sx refactor -apply -n 100 "$tmp/worktree"
+   sx refactor -apply -n 100 "$tmp/worktree/$path"
    ```
 
 6. Run tests in the worktree. Prefer the repository's documented test command;

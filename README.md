@@ -302,9 +302,10 @@ Safety comes in layers, and each one can only reject a change:
 |---|---|
 | Type-aware tools | Edits are made on the type-checked AST, never by text substitution. `gopls` preserves semantics when it inlines or extracts: it binds arguments that cannot be substituted and keeps conversions explicit. `eg` rewrites only expressions whose types match the template |
 | Conservative scope | Only unexported functions are inlined, only unreachable functions are removed, and only identical code within one package is deduplicated. Generated files and files outside the current build are never edited. Inlining also skips functions that carry `//go:` directives, use `unsafe`, or are named by assembly or `//go:linkname` |
-| Predictor refusals | Patterns the tools get wrong are refused before anything is written, such as values copied after their address is taken, lost loop-carried writes, and control flow that leaves an extracted run. See [Appendix A](#appendix-a-transformation-models) |
-| Gates | Each change must parse, gofmt, build, and pass the tests of its package and every package that imports it |
-| Revert | A change that fails any gate, or does not make the tree smaller, is undone before the next one is tried |
+| Exact duplicates | Two runs are copies only when they agree token for token (operators, `:=` or `=`, `break` or `continue`, a variadic `...`) and when every identifier means the same thing, or is a local of the same type, in each copy |
+| Predictor refusals | Patterns the tools get wrong are refused before anything is written, such as a `defer` or `recover` that would move into a helper, values copied after their address is taken, lost loop-carried writes, and control flow that leaves an extracted run. See [Appendix A](#appendix-a-transformation-models) |
+| Gates | Each change must parse, gofmt, build, and pass the tests of every package under the target path and every package that imports one of them. Tests that already failed before the first change are recorded and skipped, and only a new failure rejects a change |
+| Revert | A change that fails any gate, or does not make the tree smaller, is undone before the next one is tried. An interrupted run (Ctrl-C, SIGTERM) stops its tests and reverts the change in progress |
 | Read-only CI mode | `-check` never writes, and `-check -apply` is rejected |
 
 The tests are the final word on behaviour, so the stronger your test suite, the
@@ -663,7 +664,7 @@ go tool sx [-json] [-n 20] [-tests] <paths...>
 Refactor a module:
 
 ```bash
-go tool sx refactor [-apply] [-check] [-n 10] [-test=false] [-eg path] <dir>
+go tool sx refactor [-apply] [-check] [-n 10] [-test=false] [-eg path] [-cpuprofile file] [path]
 ```
 
 Useful flags:
@@ -677,7 +678,8 @@ Useful flags:
 | `-check` | refactor | Exit non-zero when a shrinking candidate is found; never writes files; cannot be combined with `-apply` |
 | `-n` | refactor | Number of candidates to attempt; default is `10` |
 | `-test=false` | refactor | Skip tests after each accepted-looking change |
-| `-eg` | refactor | File or directory of `eg` templates; repeatable |
+| `-eg` | refactor | File or directory of `eg` templates; repeatable. Default: `examples/eg` and `sx/examples/eg` under the target path, its module root, its repository root, and the current directory |
+| `-cpuprofile` | refactor | Write a CPU profile of the run to a file |
 
 ## CI Example
 
@@ -726,12 +728,20 @@ The minimization loop is greedy and measurement-gated:
    covers non-test `.go` files that match the current build constraints,
    skipping `vendor`, `testdata`, and directories starting with `.` or `_`.
    `_test.go` files are not counted.
-2. Compute the test scope once: the package in the target directory plus every
-   package in its module that depends on it, directly or transitively. If
-   `go list` cannot answer, the scope falls back to `./...` under the target.
-3. For each attempt, run the available detectors fresh against the current tree,
-   in this order: `deadcode`, inline, deduplication (both need `gopls`), and `eg`
-   templates. A detector that errors contributes no candidates.
+2. Compute the test scope once: every package under the target path plus every
+   package in its module that depends on one of them, directly or transitively.
+   At the module root that is `./...`, which is also the fallback when `go list`
+   cannot answer. With `-apply`, run the scope's tests once and record what
+   already fails; those tests are skipped from then on.
+3. For each attempt, run the available detectors against the current tree, in
+   this order: `deadcode`, inline, deduplication (both need `gopls`), and `eg`
+   templates. A detector that errors contributes no candidates. Detection is
+   incremental: export data is listed once per pass, and a package is parsed,
+   type-checked, and searched again only when its files or the export data of
+   what it imports have changed. `deadcode` runs once per run and again only
+   when a pass finds nothing, because none of the transformations can make an
+   unreachable function reachable. `eg` matches are found by the model's own
+   matcher, and the `eg` binary runs only to apply a chosen template.
 4. Price each candidate with its transformation model
    ([Appendix A](#appendix-a-transformation-models)) and pick the one with the
    highest predicted saving, `−ΔN > 0`, whose key has not already been tried;
@@ -749,9 +759,11 @@ The minimization loop is greedy and measurement-gated:
    reverts the change and aborts the run), then `go build ./...`. If every build error is an unused
    import, run `gopls imports` on those files and build again.
 8. Parse again and measure `C'`. If tests are enabled, run `go test` on the
-   precomputed scope only after the build and measurement succeed.
-9. Keep the change iff it builds, tests pass, and `C' < C`. Otherwise, restore
-   the files the apply step recorded.
+   precomputed scope, skipping the tests that failed at the start, only after
+   the build and measurement succeed.
+9. Keep the change iff it builds, no test fails that passed at the start, and
+   `C' < C`. Otherwise, restore the files the apply step recorded. A revert
+   message names the first compiler error or the first new test failure.
 10. If kept, set `C = C'`. Either way, redetect candidates on the next attempt
     and repeat until no candidate remains or `-n` attempts have been made.
 
@@ -1018,6 +1030,9 @@ into code that does not compile or that behaves differently:
 | The signature needs a type parameter | `gopls` does not carry the enclosing function's type parameters over |
 | The signature names a package the file does not import | `gopls` does not add the import |
 | Two parameters would share a name | A type switch declares its variable once per clause |
+| The run contains a `defer` or a call to `recover`, outside a nested function literal | Both belong to the enclosing function's frame. Moved into a helper, `defer mu.Unlock()` releases the lock when the helper returns, and the caller carries on unlocked |
+| An identifier means something different in another copy, or a local has a different type there | The call `gopls` writes for the first copy is pasted over the others, so it must mean the same thing at each one |
+| The code after another copy needs different results | A result one copy's caller reads and another's does not would be declared and never used at the second |
 
 ### A.4 `eg` rewrites
 

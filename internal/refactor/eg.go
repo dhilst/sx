@@ -1,11 +1,9 @@
 package refactor
 
 import (
-	"bytes"
 	"fmt"
 	"go/ast"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
@@ -58,51 +56,42 @@ func EgTemplates(paths []string) ([]string, error) {
 	return out, nil
 }
 
-// EgCandidates asks eg which templates match this tree, and has the model
-// price each one over every match.
+// EgCandidates finds the templates that match this tree and has the model
+// price each one over every match. eg itself runs only when a candidate is
+// applied.
 func EgCandidates(egPath, dir string, templates []string) ([]Candidate, error) {
-	all, err := egRewrites(egPath, dir, templates)
+	return NewCache().Eg(dir, templates)
+}
+
+// Eg is EgCandidates reusing what the cache already knows.
+func (c *Cache) Eg(dir string, templates []string) ([]Candidate, error) {
+	all, err := c.egRewrites(dir, templates)
 	if err != nil {
 		return nil, err
 	}
 	var out []Candidate
-	for _, c := range all {
-		if c.Predicted > 0 {
-			out = append(out, c)
+	for _, cand := range all {
+		if cand.Predicted > 0 {
+			out = append(out, cand)
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
 	return out, nil
 }
 
-// egRewrites is every template eg finds a match for, priced by the model.
-func egRewrites(egPath, dir string, templates []string) ([]Candidate, error) {
+// egRewrites is every template with a match, priced by the model.
+func (c *Cache) egRewrites(dir string, templates []string) ([]Candidate, error) {
 	var out []Candidate
-	ps := packages{}
 	for _, tmpl := range templates {
-		matches, firstFile, err := func() (int, string, error) {
-			cmd := exec.Command(egPath, "-t", tmpl, "./...")
-			cmd.Dir = dir
-			var stdout, stderr bytes.Buffer
-			cmd.Stdout = &stdout
-			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				return 0, "", fmt.Errorf("eg %s: %w: %s", filepath.Base(tmpl), err, firstLine(stderr.String()))
-			}
-			return parseEgMatches(dir, stderr.String())
-		}()
-		if err != nil || matches == 0 {
-			continue
-		}
-		model, err := predictEg(ps, dir, tmpl)
-		if err != nil {
+		model, firstFile, err := predictEg(c, dir, tmpl)
+		if err != nil || model.Matches == 0 {
 			continue
 		}
 		name := strings.TrimSuffix(filepath.Base(tmpl), filepath.Ext(tmpl))
 		out = append(out, Candidate{
 			Kind: KindEg, File: firstFile, Target: name, Predicted: -model.Delta(),
 			Template: tmpl, model: model,
-			Detail: fmt.Sprintf("%s matches %d expression(s): %s", filepath.Base(tmpl), matches, model),
+			Detail: fmt.Sprintf("%s: %s", filepath.Base(tmpl), model),
 		})
 	}
 	return out, nil
