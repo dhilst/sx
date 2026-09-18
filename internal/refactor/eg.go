@@ -13,7 +13,7 @@ import (
 	"strconv"
 	"strings"
 
-	"sx/internal/cost"
+	"github.com/dhilst/sx/internal/cost"
 )
 
 // EgTemplates returns the example rewrite templates in paths.

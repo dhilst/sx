@@ -30,14 +30,12 @@ Steps:
 5. Validate the generated templates:
 
    ```bash
-   sx refactor -check -eg <path> .
+   go tool sx refactor -check -eg <path> .
    ```
 
-   If this repository is the `sx` source tree, use:
-
-   ```bash
-   go run ./cmd/sx refactor -check -eg <path> .
-   ```
+   Use `sx refactor -check -eg <path> .` when the repository does not declare
+   `sx` as a tool dependency, or `go run ./cmd/sx ...` inside the `sx` source
+   tree.
 
 6. Keep templates that parse, type-check under `eg`, and reduce AST size when
    they match.

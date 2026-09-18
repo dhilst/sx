@@ -11,7 +11,7 @@ import (
 	"sort"
 	"strings"
 
-	"sx/internal/cost"
+	"github.com/dhilst/sx/internal/cost"
 )
 
 // Duplication is found by hashing every contiguous run of statements, with the

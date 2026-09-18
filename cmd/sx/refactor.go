@@ -3,7 +3,7 @@ package main
 import (
 	"time"
 
-	"sx/internal/cost"
+	"github.com/dhilst/sx/internal/cost"
 )
 
 func scoreTree(dir string) (int, error) {

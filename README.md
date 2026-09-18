@@ -15,6 +15,15 @@ review, not as a formatter.
 
 ## Quick Start
 
+Add `sx` to a Go module as a tool dependency:
+
+```bash
+go get -tool github.com/dhilst/sx/cmd/sx
+```
+
+That records it in `go.mod` and gives you `go tool sx` in that module: no binary
+on `PATH`, and the version pinned next to every other dependency.
+
 Install the external tools used for transformations:
 
 ```bash
@@ -26,19 +35,19 @@ go install golang.org/x/tools/cmd/eg@latest
 Measure a module:
 
 ```bash
-go run ./cmd/sx .
+go tool sx .
 ```
 
 Preview one shrinking candidate:
 
 ```bash
-go run ./cmd/sx refactor .
+go tool sx refactor .
 ```
 
 Apply candidates and keep only changes that pass the gates:
 
 ```bash
-go run ./cmd/sx refactor -apply -n 30 .
+go tool sx refactor -apply -n 30 .
 ```
 
 Run the tests after the pass:
@@ -52,6 +61,11 @@ Inspect the patch before committing:
 ```bash
 git diff
 ```
+
+Inside this repository the tool dependency is its own `cmd/sx`, so `go tool sx`
+and `go run ./cmd/sx` build the same program. The examples below use the tool
+form because it is the one that also works from a module that only depends on
+`sx`.
 
 ## The measure
 
@@ -68,7 +82,7 @@ a ranking.
 Command form:
 
 ```bash
-go run ./cmd/sx [-json] [-n 20] [-tests] <paths...>
+go tool sx [-json] [-n 20] [-tests] <paths...>
 ```
 
 ## The transformations
@@ -97,7 +111,7 @@ go install golang.org/x/tools/cmd/deadcode@latest
 go install golang.org/x/tools/gopls@latest
 go install golang.org/x/tools/cmd/eg@latest
 
-go run ./cmd/sx refactor [-apply] [-check] [-n 30] [-eg examples/eg] <dir>
+go tool sx refactor [-apply] [-check] [-n 30] [-eg examples/eg] <dir>
 ```
 
 None of these tools has any notion of which change is worth making. That is what the
@@ -122,14 +136,14 @@ contain comma-separated paths or paths separated by the operating system path-li
 separator.
 
 ```bash
-go run ./cmd/sx refactor -apply -eg ./my-eg-rules -eg ./team/rules/time.go .
-go run ./cmd/sx refactor -apply -eg ./my-eg-rules,./team/rules .
+go tool sx refactor -apply -eg ./my-eg-rules -eg ./team/rules/time.go .
+go tool sx refactor -apply -eg ./my-eg-rules,./team/rules .
 ```
 
 Disable example rewrites:
 
 ```bash
-go run ./cmd/sx refactor -apply -eg "" .
+go tool sx refactor -apply -eg "" .
 ```
 
 The checked-in examples cover small expression reductions such as:
@@ -149,13 +163,19 @@ strings.Index(s, sub)==-1 -> !strings.Contains(s, sub)
 
 ### CI mode
 
-Use `-check` to fail a build when `sx` can prove that at least one shrinking
-change is available. Check mode applies candidates in the working tree, runs the
-same gates, reverts the successful candidate, and exits non-zero when a
-size-reducing patch is possible.
+Use `-check` to fail a build when a shrinking candidate exists. Check mode
+detects candidates and stops at the first one: it prints what it would do and
+exits non-zero. It never writes to the tree.
+
+That is deliberately weaker than what `-apply` knows. `-apply` earns its numbers
+by making the change and measuring it, and a check that edits the code it is
+checking is the wrong shape for CI. So `-check` reports the prediction rather
+than the proven saving, and the prediction is routinely wrong in both
+directions - including candidates that turn out not to be applicable at all.
+Expect it to fail on work `-apply` would end up rejecting.
 
 ```bash
-go run ./cmd/sx refactor -check -n 30 .
+go tool sx refactor -check -n 30 .
 ```
 
 GitHub Actions example:
@@ -179,8 +199,13 @@ jobs:
       - run: go install golang.org/x/tools/cmd/deadcode@latest
       - run: go install golang.org/x/tools/gopls@latest
       - run: go install golang.org/x/tools/cmd/eg@latest
-      - run: go run ./cmd/sx refactor -check -n 30 .
+      - run: go tool sx refactor -check -n 30 .
 ```
+
+`go tool sx` resolves from the `tool` directive in your `go.mod`, so the version
+CI runs is the one the repository pins. If you would rather not record the
+dependency, `go run github.com/dhilst/sx/cmd/sx@latest refactor -check -n 30 .`
+works too, at the cost of an unpinned version.
 
 ### Assistant commands
 
@@ -336,3 +361,7 @@ helpers went that way in the run above.
 
 That is the objective working, not failing, but it is the whole objective. It
 knows nothing about whether the result is easier to read.
+
+## License
+
+Apache License 2.0. See [LICENSE](LICENSE).

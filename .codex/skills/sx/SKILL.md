@@ -37,12 +37,16 @@ Procedure:
 4. Locate the `sx` command. Prefer these in order:
 
    ```bash
+   go tool sx
    go run ./cmd/sx
    sx
    ```
 
-   If the target repository is not the `sx` source repository, use an installed
-   `sx` binary, or ask the user for the path.
+   `go tool sx` works when the target module declares `sx` as a tool dependency;
+   add it with `go get -tool github.com/dhilst/sx/cmd/sx` if the user agrees to
+   the go.mod change. `go run ./cmd/sx` only works inside the `sx` source
+   repository. Otherwise use an installed `sx` binary, or ask the user for the
+   path.
 
 5. Install missing helper tools if network access and policy allow it:
 
@@ -55,7 +59,7 @@ Procedure:
 6. Run minimization inside the worktree:
 
    ```bash
-   go run ./cmd/sx refactor -apply -n 100 "$tmp/worktree"
+   go tool sx refactor -apply -n 100 "$tmp/worktree"
    ```
 
    If using an installed binary:
@@ -108,8 +112,8 @@ Procedure:
 
 4. Prefer examples that do not duplicate, remove, or reorder wildcard
    expressions with side effects.
-5. Run `sx refactor -check -eg <path> .` or the local equivalent to confirm the
-   examples are valid and can be evaluated.
+5. Run `go tool sx refactor -check -eg <path> .` or the local equivalent to
+   confirm the examples are valid and can be evaluated.
 6. Keep only templates that parse, type-check under `eg`, and reduce AST size
    when they match.
 

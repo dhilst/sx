@@ -42,13 +42,16 @@ Steps:
    go install golang.org/x/tools/cmd/eg@latest
    ```
 
-5. Run `sx` in the worktree. If this repository is the `sx` source tree:
+5. Run `sx` in the worktree. If the repository declares `sx` as a tool
+   dependency in `go.mod`, which is the preferred setup:
 
    ```bash
-   go run ./cmd/sx refactor -apply -n 100 "$tmp/worktree"
+   go tool sx refactor -apply -n 100 "$tmp/worktree"
    ```
 
-   Otherwise use an installed command:
+   Add it with `go get -tool github.com/dhilst/sx/cmd/sx` if it is missing and
+   the user agrees to the go.mod change. Inside the `sx` source tree
+   `go run ./cmd/sx` is equivalent. Otherwise fall back to an installed command:
 
    ```bash
    sx refactor -apply -n 100 "$tmp/worktree"

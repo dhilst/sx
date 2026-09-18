@@ -23,7 +23,7 @@ import (
 	"strconv"
 	"strings"
 
-	"sx/internal/cost"
+	"github.com/dhilst/sx/internal/cost"
 )
 
 // Kind names what a candidate proposes.

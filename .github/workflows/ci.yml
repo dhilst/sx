@@ -37,5 +37,22 @@ jobs:
       - name: test
         run: go test ./... -count=1
 
+      - name: install refactor tools
+        run: |
+          go install golang.org/x/tools/cmd/deadcode@latest
+          go install golang.org/x/tools/gopls@latest
+          go install golang.org/x/tools/cmd/eg@latest
+
       - name: score this repository
-        run: go run ./cmd/sx .
+        run: go tool sx .
+
+      # Fails while any shrinking candidate is still detectable, including
+      # ones -apply would reject: detection cannot tell the difference without
+      # writing to the tree, and -check never writes.
+      - name: check for shrinking candidates
+        run: go tool sx refactor -check -n 30 .
+
+      # -check must stay read-only. This is the regression guard for that.
+      - name: the check must leave the tree untouched
+        if: always()
+        run: git diff --exit-code

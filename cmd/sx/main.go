@@ -18,10 +18,10 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
-	"sx/internal/refactor"
 	"time"
 
-	"sx/internal/cost"
+	"github.com/dhilst/sx/internal/cost"
+	"github.com/dhilst/sx/internal/refactor"
 )
 
 func main() {
@@ -38,7 +38,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		fs.SetOutput(stderr)
 		var egPaths pathListFlag
 		apply := fs.Bool("apply", false, "write changes; without it, list what would be tried")
-		check := fs.Bool("check", false, "exit non-zero if a shrinking change can be proven; leaves the tree unchanged")
+		check := fs.Bool("check", false, "exit non-zero at the first shrinking candidate; never writes to the tree")
 		rounds := fs.Int("n", 10, "how many changes to attempt")
 		runTests := fs.Bool("test", true, "run the tests after each change and revert if they fail")
 		fs.Var(&egPaths, "eg", "file or directory of eg templates; repeat or separate with commas/path-list separators (empty disables eg)")
@@ -127,13 +127,22 @@ func run(args []string, stdout, stderr io.Writer) error {
 			}
 			attempted++
 			tried[c.Key()] = true
-			if !*apply && !*check {
-				fmt.Fprintf(stdout, "\nwould %s %s at %s:%d, predicted -%d nodes\n    %s\n", c.Kind, c.Target, func() string {
+			if !*apply {
+				where := func() string {
 					if r, err := filepath.Rel(dir, c.File); err == nil {
 						return r
 					}
 					return c.File
-				}(), c.Line, c.Predicted, c.Detail)
+				}()
+				fmt.Fprintf(stdout, "\nwould %s %s at %s:%d, predicted -%d nodes\n    %s\n", c.Kind, c.Target, where, c.Line, c.Predicted, c.Detail)
+				// -check stops here rather than applying the candidate to see
+				// what it really saves. Proving the saving means writing to
+				// the tree, and a check that edits the code it is checking is
+				// the wrong shape for CI: the guarantee is worth more than the
+				// sharper number.
+				if *check {
+					return fmt.Errorf("minimization possible: %s %s at %s:%d, predicted -%d nodes", c.Kind, c.Target, where, c.Line, c.Predicted)
+				}
 				break
 			}
 			start := time.Now()
@@ -143,6 +152,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 				continue
 			}
 			if err := refactor.Format(dir, start); err != nil {
+				// Apply has already written to the tree. Returning here
+				// without reverting would leave a change on disk that nothing
+				// decided to keep.
+				if rerr := revert(); rerr != nil {
+					return fmt.Errorf("%w (and the revert failed: %v)", err, rerr)
+				}
 				return err
 			}
 			builds, repairErr := refactor.Repair(dir)
@@ -175,13 +190,6 @@ func run(args []string, stdout, stderr io.Writer) error {
 					return err
 				}
 			default:
-				if *check {
-					fmt.Fprintf(stdout, "  %-2d %7s  possible %s %s  %d -> %d (-%d, predicted -%d), tests pass\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted)
-					if err := revert(); err != nil {
-						return err
-					}
-					return fmt.Errorf("minimization possible: %s %s saves %d nodes", c.Kind, c.Target, before-after)
-				}
 				fmt.Fprintf(stdout, "  %-2d %7s  %-6s %-22s %d -> %d (-%d, predicted -%d), tests pass\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted)
 				before = after
 				applied++
