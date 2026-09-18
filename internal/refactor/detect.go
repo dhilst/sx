@@ -196,6 +196,10 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 		nodes int
 		fn    *ast.FuncDecl
 	}
+	type call struct {
+		pos        token.Position
+		expression bool
+	}
 	// Everything is keyed by directory as well as name, because an unexported
 	// function belongs to its package. A bare name conflated same-named
 	// helpers in different packages, and the platform variants of one name in
@@ -205,7 +209,7 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 	// function that is still called.
 	decls := map[string]decl{}
 	declared := map[string]int{}
-	calls := map[string][]token.Position{}
+	calls := map[string][]call{}
 	// References, not just calls. A function can be named without being
 	// called - `var ParseFoo = parseFoo` in an export_test.go is the standard
 	// way the standard library reaches its own unexported code - and that
@@ -287,15 +291,28 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 				decls[k] = decl{file: path, line: fset.Position(fn.Pos()).Line, nodes: cost.Count(fn), fn: fn}
 			}
 		}
+		var stack []ast.Node
 		ast.Inspect(f, func(n ast.Node) bool {
-			switch x := n.(type) {
-			case *ast.CallExpr:
+			if n == nil {
+				stack = stack[:len(stack)-1]
+				return true
+			}
+			if x, ok := n.(*ast.CallExpr); ok {
 				if id, ok := x.Fun.(*ast.Ident); ok {
-					calls[key(path, id.Name)] = append(calls[key(path, id.Name)], fset.Position(x.Lparen))
+					parent := ast.Node(nil)
+					if len(stack) > 0 {
+						parent = stack[len(stack)-1]
+					}
+					calls[key(path, id.Name)] = append(calls[key(path, id.Name)], call{
+						pos:        fset.Position(x.Lparen),
+						expression: callInExpression(parent, x),
+					})
 				}
-			case *ast.Ident:
+			}
+			if x, ok := n.(*ast.Ident); ok {
 				refs[key(path, x.Name)]++
 			}
+			stack = append(stack, n)
 			return true
 		})
 	}
@@ -317,10 +334,10 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 		if refs[k] != 2 {
 			continue
 		}
-		if generated(sites[0].Filename) {
+		if generated(sites[0].pos.Filename) {
 			continue // the one call site is in a file that must not be edited
 		}
-		if strings.HasSuffix(sites[0].Filename, "_test.go") {
+		if strings.HasSuffix(sites[0].pos.Filename, "_test.go") {
 			// The measure does not count tests. Inlining into one and removing
 			// the declaration moves the body out of what is measured rather
 			// than removing it, and the measure records the whole thing as a
@@ -330,8 +347,8 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 			continue
 		}
 		if func() bool {
-			var line int = sites[0].Line
-			for _, r := range directed[sites[0].Filename] {
+			var line int = sites[0].pos.Line
+			for _, r := range directed[sites[0].pos.Filename] {
 				if line >= r[0] && line <= r[1] {
 					return true
 				}
@@ -340,25 +357,52 @@ func InlineCandidates(dir string) ([]Candidate, error) {
 		}() {
 			continue // the call sits inside a function a directive constrains
 		}
+		if sites[0].expression && !singleReturnExpr(d.fn) {
+			// gopls preserves statement bodies in expression position by
+			// wrapping them in an immediately-invoked function literal. That
+			// routinely erases the predicted saving, so leave those attempts
+			// to the cases where the body can inline as an expression.
+			continue
+		}
 		// What is saved is the wrapper: the declaration and its signature,
 		// less whatever the inliner has to add at the call site to preserve
-		// behaviour. That last part is not predictable from the syntax - gopls
-		// binds parameters to locals when they are used more than once, and
-		// wraps the body in a closure when the call sits inside an expression -
-		// so this figure orders the attempts and nothing more. The measurement
-		// after the change is what decides.
+		// behaviour. Some of that can be predicted - for example, statement
+		// bodies in expression position need a closure and are skipped above.
+		// The rest still belongs to gopls, so this figure orders the attempts
+		// and nothing more. The measurement after the change is what decides.
 		saving := d.nodes - cost.Count(d.fn.Body) + 1
 		if saving <= 0 {
 			continue
 		}
 		cands = append(cands, Candidate{
-			Kind: KindInline, File: sites[0].Filename, Line: sites[0].Line, Col: sites[0].Column,
+			Kind: KindInline, File: sites[0].pos.Filename, Line: sites[0].pos.Line, Col: sites[0].pos.Column,
 			Target: name, Predicted: saving,
 			Detail: fmt.Sprintf("%s is called once; inlining drops the declaration and the call", name),
 		})
 	}
 	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Predicted > cands[j].Predicted })
 	return cands, nil
+}
+
+func callInExpression(parent ast.Node, call *ast.CallExpr) bool {
+	switch p := parent.(type) {
+	case *ast.ExprStmt:
+		return p.X != call
+	case *ast.GoStmt:
+		return p.Call != call
+	case *ast.DeferStmt:
+		return p.Call != call
+	default:
+		return true
+	}
+}
+
+func singleReturnExpr(fn *ast.FuncDecl) bool {
+	if fn == nil || fn.Body == nil || len(fn.Body.List) != 1 {
+		return false
+	}
+	ret, ok := fn.Body.List[0].(*ast.ReturnStmt)
+	return ok && len(ret.Results) == 1
 }
 
 // testFilesIn is the tests, read for the call sites they contain and for what

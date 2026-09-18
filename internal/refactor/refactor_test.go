@@ -415,6 +415,55 @@ func TestInlineKeySurvivesTheCallSiteMoving(t *testing.T) {
 	}
 }
 
+func TestMultiStatementFunctionsCalledInExpressionContextAreNotInlineCandidates(t *testing.T) {
+	dir := write(t, "p.go", `package p
+
+func A(xs []int) int {
+	return helper(xs)
+}
+
+func helper(xs []int) int {
+	total := 0
+	for _, x := range xs {
+		total += x
+	}
+	return total
+}
+`)
+	cs, err := InlineCandidates(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Target == "helper" {
+			t.Fatal("a multi-statement helper called from expression context was offered for inlining")
+		}
+	}
+}
+
+func TestSingleReturnFunctionsCalledInExpressionContextRemainInlineCandidates(t *testing.T) {
+	dir := write(t, "p.go", `package p
+
+func A(n int) int {
+	return helper(n)
+}
+
+func helper(n int) int {
+	return n + 1
+}
+`)
+	cs, err := InlineCandidates(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range cs {
+		if c.Target == "helper" {
+			return
+		}
+	}
+	t.Fatal("a single-return helper called from expression context should still be offered")
+}
+
 // A generated file says not to edit it, and it means it: the change is erased
 // the next time the generator runs. The loop rewrote index/suffixarray/sais2.go
 // before this, stripping 512 lines of comments from a generated algorithm.
