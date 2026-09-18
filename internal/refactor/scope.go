@@ -119,7 +119,21 @@ type Failures map[string]bool
 // fails before the first change, skips it, and rejects a change only for a
 // failure it caused.
 func (s Scope) Failures(skip Failures) (Failures, error) {
+	return s.run(skip, false)
+}
+
+// Recheck runs the scope's tests again without Go's test cache. Asked of an
+// unchanged tree, the cache answers with the result recorded before, which
+// is the one question a recheck must not have answered for it.
+func (s Scope) Recheck(skip Failures) (Failures, error) {
+	return s.run(skip, true)
+}
+
+func (s Scope) run(skip Failures, fresh bool) (Failures, error) {
 	args := []string{"test", "-json"}
+	if fresh {
+		args = append(args, "-count=1")
+	}
 	var names []string
 	seen := map[string]bool{}
 	for k := range skip {

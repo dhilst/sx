@@ -278,8 +278,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 			}
 			after, scoreErr := scoreTree(dir)
 			var testErr error
+			var failures refactor.Failures
 			if *runTests && scoreErr == nil && builds {
-				var failures refactor.Failures
 				if failures, testErr = scope.Failures(baseline); testErr == nil {
 					testErr = failures.Since(baseline)
 				}
@@ -296,6 +296,35 @@ func run(args []string, stdout, stderr io.Writer) error {
 				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the tests failed: %v\n", attempted, elapsed, c.Kind, c.Target, testErr)
 				if err := revert(); err != nil {
 					return err
+				}
+				// A failure is the change's only if it goes away without the
+				// change. milvus's tracer tests began failing mid-run on their
+				// own, and every change after that was blamed for it. So the
+				// scope runs again on the reverted tree; what still fails
+				// joins the baseline, and if that was all, the candidate is
+				// tried again.
+				if again, err := scope.Recheck(baseline); err == nil {
+					innocent := true
+					for k := range failures {
+						if !baseline[k] && !again[k] {
+							innocent = false
+						}
+					}
+					var joined []string
+					for k := range again {
+						if !baseline[k] {
+							baseline[k] = true
+							pkg, test, _ := strings.Cut(k, "\x00")
+							joined = append(joined, strings.TrimSpace(pkg+" "+test))
+						}
+					}
+					if len(joined) > 0 {
+						sort.Strings(joined)
+						fmt.Fprintf(stdout, "      (%s fails without the change too; skipped from now on)\n", strings.Join(joined, ", "))
+					}
+					if innocent {
+						delete(tried, c.Key())
+					}
 				}
 			case after >= before:
 				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  %d -> %d nodes, no gain\n", attempted, elapsed, c.Kind, c.Target, before, after)
