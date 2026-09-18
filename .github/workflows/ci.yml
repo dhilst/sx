@@ -34,14 +34,22 @@ jobs:
       - name: vet
         run: go vet ./...
 
-      - name: test
-        run: go test ./... -count=1
-
+      # Pinned: the transformation models (README, Appendix A) are checked
+      # against these versions, and the tests below need them installed -
+      # without them the example harness skips instead of running.
       - name: install refactor tools
+        env:
+          GOTOOLCHAIN: auto # the tools need a newer Go than the module
         run: |
-          go install golang.org/x/tools/cmd/deadcode@latest
-          go install golang.org/x/tools/gopls@latest
-          go install golang.org/x/tools/cmd/eg@latest
+          go install golang.org/x/tools/cmd/deadcode@v0.50.0
+          go install golang.org/x/tools/gopls@v0.23.0
+          go install golang.org/x/tools/cmd/eg@v0.50.0
+
+      # Includes the test/examples harness: every model's prediction must
+      # equal the measured change, and sx must turn each _before.go into its
+      # _after.go.
+      - name: test
+        run: go test ./... -count=1 -timeout 20m
 
       - name: score this repository
         run: go tool sx .

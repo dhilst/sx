@@ -151,12 +151,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 				break
 			}
 			start := time.Now()
+			snapshot, err := refactor.Stamp(dir)
+			if err != nil {
+				return err
+			}
 			revert, err := refactor.Apply(dir, c, goplsPath, egPath)
 			if err != nil {
 				fmt.Fprintf(stdout, "  %-2d %7s  skipped  %s %s  %v\n", attempted, round(time.Since(start)), c.Kind, c.Target, err)
 				continue
 			}
-			if err := refactor.Format(dir, start); err != nil {
+			if err := refactor.Format(dir, snapshot); err != nil {
 				// Apply has already written to the tree. Returning here
 				// without reverting would leave a change on disk that nothing
 				// decided to keep.

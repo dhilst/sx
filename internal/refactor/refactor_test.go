@@ -5,7 +5,6 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
-	"time"
 )
 
 func write(t *testing.T, name, src string) string {
@@ -26,26 +25,26 @@ func write(t *testing.T, name, src string) string {
 func TestDuplicateRunsAreFoundInsideBlocks(t *testing.T) {
 	dir := write(t, "p.go", `package p
 
-func A(xs []int) int {
-	total := 0
+import "fmt"
+
+func A(xs []int) {
+	fmt.Println("A")
 	for _, x := range xs {
 		scaled := x * 2
 		adjusted := scaled + 1
-		total += adjusted
-		total += scaled
+		fmt.Println(scaled, adjusted)
+		fmt.Println(adjusted * scaled)
 	}
-	return total
 }
 
-func B(xs []int) int {
-	total := 0
+func B(xs []int) {
+	fmt.Println("B")
 	for _, x := range xs {
 		scaled := x * 2
 		adjusted := scaled + 1
-		total += adjusted
-		total += scaled
+		fmt.Println(scaled, adjusted)
+		fmt.Println(adjusted * scaled)
 	}
-	return total * 2
 }
 `)
 	got, err := DuplicateCandidates(dir)
@@ -176,20 +175,32 @@ func TestParseEgMatches(t *testing.T) {
 	}
 }
 
-func TestEgTemplateDelta(t *testing.T) {
-	dir := write(t, "template.go", `//go:build ignore
+// A wildcard the template drops saves the expression it bound, not one
+// node: s[:len(s)] -> s on x.s removes the pattern's four nodes and the
+// second copy of x.s.
+func TestEgModelCountsDroppedWildcards(t *testing.T) {
+	dir := write(t, "p.go", `package p
+
+type T struct{ s string }
+
+func A(x T) string { return x.s[:len(x.s)] }
+`)
+	tmpl := filepath.Join(t.TempDir(), "full-slice.go")
+	if err := os.WriteFile(tmpl, []byte(`//go:build ignore
 
 package template
 
 func before(s string) string { return s[:len(s)] }
 func after(s string) string  { return s }
-`)
-	delta, err := egTemplateDelta(filepath.Join(dir, "template.go"))
+`), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m, err := predictEg(packages{}, dir, tmpl)
 	if err != nil {
 		t.Fatal(err)
 	}
-	if delta <= 0 {
-		t.Fatalf("template should shrink the expression, got delta %d", delta)
+	if m.Matches != 1 || m.P != -4 || m.W != -2 || m.Delta() != -6 {
+		t.Fatalf("model = %s, want 1 match, P=-4, W=-2, ΔN=-6", m)
 	}
 }
 
@@ -301,7 +312,7 @@ func hashOf(t *testing.T, path string) string {
 // a change that leaves the tree unreadable.
 func TestFormatRepairsWhatTheMeasureCannotSee(t *testing.T) {
 	dir := write(t, "p.go", "package p\n\nfunc A() int {\nreturn 1\n}\n")
-	if err := Format(dir, time.Time{}); err != nil {
+	if err := Format(dir, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "p.go"))
@@ -318,7 +329,7 @@ func TestFormatRepairsWhatTheMeasureCannotSee(t *testing.T) {
 // must leave it alone rather than destroy it.
 func TestFormatLeavesUnparseableFilesAlone(t *testing.T) {
 	dir := write(t, "p.go", "package p\n\nfunc A( {\n")
-	if err := Format(dir, time.Time{}); err != nil {
+	if err := Format(dir, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := os.ReadFile(filepath.Join(dir, "p.go"))
@@ -330,40 +341,97 @@ func TestFormatLeavesUnparseableFilesAlone(t *testing.T) {
 	}
 }
 
-// A call that takes values out of the extracted function cannot be pasted at
-// the other sites. gopls extracted `var buf bytes.Buffer; cmd.Stderr = &buf`
-// into a function returning the buffer by value - the escaped address pointed
-// at the helper's local and every caller got a detached copy. It built, the
-// tests passed, and the measure fell, so only this check stands against it.
-func TestOnlyBareCallsAreSpliced(t *testing.T) {
-	for _, tc := range []struct {
-		name string
-		src  string
-		bare bool
-	}{
-		{"bare call", `package p
+// A value returned by copy after its address was taken detaches whatever
+// holds the address. gopls extracted `var buf bytes.Buffer; cmd.Stderr = &buf`
+// into a function returning the buffer by value - every caller got a detached
+// copy. It built, the tests passed, and the measure fell, so the model has to
+// refuse it.
+func TestAddressTakenResultsAreNotExtracted(t *testing.T) {
+	dir := write(t, "p.go", `package p
 
-func A() { helper() }
+import (
+	"bytes"
+	"os/exec"
+)
 
-func helper() {}
-`, true},
-		{"value returned", `package p
+func A(cmd *exec.Cmd) string {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr
+	cmd.Run()
+	return stderr.String()
+}
 
-func A() { v := helper(); _ = v }
-
-func helper() int { return 1 }
-`, false},
-	} {
-		t.Run(tc.name, func(t *testing.T) {
-			dir := write(t, "p.go", tc.src)
-			_, bare, err := callSite(filepath.Join(dir, "p.go"), "helper")
-			if err != nil {
-				t.Fatal(err)
+func B(cmd *exec.Cmd) string {
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	cmd.Stdout = &stderr
+	cmd.Run()
+	return stderr.String() + "!"
+}
+`)
+	all, err := duplicates(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, c := range all {
+		for _, name := range c.model.(Extraction).Results {
+			if name == "stderr" {
+				t.Fatalf("stderr is returned by value after &stderr: %s", c.Detail)
 			}
-			if bare != tc.bare {
-				t.Fatalf("bare = %v, want %v", bare, tc.bare)
-			}
-		})
+		}
+	}
+}
+
+// The text that replaces each copy is everything gopls put in place of the
+// first one, not just the statement holding the call.
+func TestCallSiteIncludesTheReturnCheck(t *testing.T) {
+	before := `package p
+
+import "strconv"
+
+func A(s string) (int, error) {
+	x, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, err
+	}
+	return x + 1, nil
+}
+`
+	dir := write(t, "p.go", before)
+	path := filepath.Join(dir, "p.go")
+	start := strings.Index(before, "x, err")
+	end := strings.Index(before, "\treturn x + 1") - 1
+	after := `package p
+
+import "strconv"
+
+func A(s string) (int, error) {
+	x, i, err := newFunction(s)
+	if err != nil {
+		return i, err
+	}
+	return x + 1, nil
+}
+
+func newFunction(s string) (int, int, error) {
+	x, err := strconv.Atoi(s)
+	if err != nil {
+		return 0, 0, err
+	}
+	return x, 0, nil
+}
+`
+	if err := os.WriteFile(path, []byte(after), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	got, err := callSite([]byte(before), Occurrence{StartOffset: start, EndOffset: end}, path, "newFunction")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want := "x, i, err := newFunction(s)\nif err != nil {\n\treturn i, err\n}"
+	if got != want {
+		t.Fatalf("call site = %q, want %q", got, want)
 	}
 }
 
@@ -514,6 +582,9 @@ func A() int { return 1 }
 // times - and then removed whichever declaration was parsed last.
 func TestSameNameInTwoPackagesIsNotOneFunction(t *testing.T) {
 	root := t.TempDir()
+	if err := os.WriteFile(filepath.Join(root, "go.mod"), []byte("module x\n\ngo 1.25\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
 	for _, pkg := range []string{"a", "b"} {
 		d := filepath.Join(root, pkg)
 		if err := os.MkdirAll(d, 0o755); err != nil {
@@ -830,13 +901,15 @@ func TestFormatLeavesUntouchedFilesAlone(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(dir, "fresh.go"), []byte("package p\n\nfunc B() int {\nreturn 2\n}\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	// Everything written before this moment is not this change's business.
-	cutoff := time.Now()
-	time.Sleep(10 * time.Millisecond)
-	if err := os.WriteFile(filepath.Join(dir, "fresh.go"), []byte("package p\n\nfunc B() int {\nreturn 2\n}\n"), 0o644); err != nil {
+	// Everything as it stands now is not this change's business.
+	snapshot, err := Stamp(dir)
+	if err != nil {
 		t.Fatal(err)
 	}
-	if err := Format(dir, cutoff); err != nil {
+	if err := os.WriteFile(filepath.Join(dir, "fresh.go"), []byte("package p\n\nfunc B() int {\nreturn 3\n}\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	if err := Format(dir, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	stale, err := os.ReadFile(filepath.Join(dir, "stale.go"))
@@ -850,7 +923,7 @@ func TestFormatLeavesUntouchedFilesAlone(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if string(fresh) != "package p\n\nfunc B() int {\n\treturn 2\n}\n" {
+	if string(fresh) != "package p\n\nfunc B() int {\n\treturn 3\n}\n" {
 		t.Fatalf("the file the change touched was not formatted:\n%s", fresh)
 	}
 }

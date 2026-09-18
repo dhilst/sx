@@ -244,15 +244,16 @@ Use this only for exploration. Run the full test suite before keeping the patch.
 | Kind | Helper | What it tries |
 |---|---|---|
 | Dead code | `deadcode` | Remove unreachable plain functions |
-| Inlining | `gopls` | Inline small functions used once |
+| Inlining | `gopls` | Inline unexported functions called once |
 | Deduplication | `gopls` | Extract repeated statement runs when the extraction is smaller |
 | `eg` examples | `eg` | Rewrite expressions using example templates |
 
 ### Dead Code
 
 `sx` asks `deadcode` which plain functions are unreachable from the current
-program. It then tries deleting one candidate at a time and keeps the deletion
-only if the build, tests, and measured AST count all pass.
+program. It then tries deleting one candidate at a time, together with any
+import only that function used, and keeps the deletion only if the build, tests,
+and measured AST count all pass.
 
 ### Inlining
 
@@ -261,22 +262,41 @@ package, then asks `gopls` to run the actual inline refactor and deletes the
 declaration once nothing refers to it. `gopls` owns the type-aware edit; `sx`
 owns the decision about whether the resulting patch is smaller and still valid.
 
+The predictor works out which inlining strategy `gopls` will use and what it
+will write: the substituted expression, a `var` binding for any parameter that
+cannot be replaced by its argument, braces when names would clash, and explicit
+conversions where a type would otherwise be lost. A call that `gopls` could
+only inline by wrapping the body in a function literal is not attempted.
+
 ### Deduplication
 
-`sx` looks for repeated statement runs in a package. When extracting the repeated
-run into a helper function should reduce AST size, `sx` asks `gopls` to perform
-the extraction and then replaces the other copies with calls when that remains
-buildable and smaller.
+`sx` looks for repeated statement runs in a package. It prices extracting each
+run the way `gopls` would do it, with parameters for the variables the run reads,
+results for the ones the code after it needs, and a returned flag or error check
+when the run contains `return`. When that makes the tree smaller, `sx` asks
+`gopls` to extract the first copy and replaces every other copy with the same
+call site `gopls` wrote.
 
 This is deliberately conservative. It does not try to invent arbitrary
 abstractions; it only attempts repeated code that can be represented as a normal
-Go extraction and accepted by the same build, test, and measurement gates.
+Go extraction and accepted by the same build, test, and measurement gates. Runs
+that `gopls` would extract incorrectly are refused before anything is written:
+
+- a variable whose address the run takes, which would be copied into or out of
+  the helper
+- a write the run makes that a loop or closure reads later
+- a `break`, `continue`, or `goto` that leaves the run
+- a type parameter of the enclosing function in the new signature
+- a type from a package the file does not import
+- two parameters with the same name
 
 ### `eg` Rewrites
 
-`sx` loads `eg` templates from configured directories, prices the AST difference
-between each template's `before` and `after` expressions, asks `eg` where the
-template matches, and applies the rewrite only when it is selected as a candidate.
+`sx` loads `eg` templates from configured directories, asks `eg` whether each
+template matches, and prices the rewrite over every match. A wildcard that
+`after` uses fewer times than `before`, as in `s[:len(s)] -> s`, also saves the
+expression it matched. The rewrite is applied only when it is selected as a
+candidate.
 
 Every attempted change follows this loop:
 
@@ -288,8 +308,11 @@ Every attempted change follows this loop:
 6. run the tests of the packages that could be affected
 7. keep the change only if it builds, the tests pass, and the count went down
 
-The predicted saving only decides what to try first. The final measured count is
-what decides whether the change stays.
+The predicted saving decides what to try first and whether a candidate is
+offered at all. Each model rebuilds what the helper tool will write and counts
+it, so the prediction is meant to equal the measured change; see
+[Appendix A](#appendix-a-transformation-models). The final measured count is
+still what decides whether the change stays.
 
 ## Code Reduction Examples
 
@@ -469,11 +492,16 @@ jobs:
       - uses: actions/setup-go@v5
         with:
           go-version-file: go.mod
-      - run: go install golang.org/x/tools/cmd/deadcode@latest
-      - run: go install golang.org/x/tools/gopls@latest
-      - run: go install golang.org/x/tools/cmd/eg@latest
+      - run: go install golang.org/x/tools/cmd/deadcode@v0.50.0
+      - run: go install golang.org/x/tools/gopls@v0.23.0
+      - run: go install golang.org/x/tools/cmd/eg@v0.50.0
       - run: go tool sx refactor -check -n 30 .
 ```
+
+The versions are the ones the models in
+[Appendix A](#appendix-a-transformation-models) were checked against. A newer
+`gopls` may extract or inline differently, which costs wasted attempts, not
+wrong results: the measured count still decides.
 
 ## Troubleshooting
 
@@ -499,9 +527,12 @@ The minimization loop is greedy and measurement-gated:
 3. For each attempt, run the available detectors fresh against the current tree,
    in this order: `deadcode`, inline, deduplication (both need `gopls`), and `eg`
    templates. A detector that errors contributes no candidates.
-4. Attach each candidate to a predicted saving and pick the one with the
-   highest positive prediction whose key has not already been tried; ties go to
-   the earlier detector. The chosen key is marked as tried whatever the outcome.
+4. Price each candidate with its transformation model
+   ([Appendix A](#appendix-a-transformation-models)) and pick the one with the
+   highest predicted saving, `−ΔN > 0`, whose key has not already been tried;
+   ties go to the earlier detector. Candidates the model refuses, or predicts
+   would not shrink the tree, are never offered. The chosen key is marked as
+   tried whatever the outcome.
 5. Without `-apply`, report that candidate and stop without writing. With
    `-check`, report it and exit non-zero. If no candidate remains, both modes
    exit successfully. `-check` and `-apply` are rejected together before
@@ -509,8 +540,8 @@ The minimization loop is greedy and measurement-gated:
 6. With `-apply`, apply one candidate to the working tree. If the edit cannot be
    produced or is rejected by the apply step's own checks, report it as skipped
    and continue; a skipped candidate still counts as an attempt.
-7. gofmt the files the change touched (a formatting failure reverts the change
-   and aborts the run), then `go build ./...`. If every build error is an unused
+7. gofmt the files whose content the change altered (a formatting failure
+   reverts the change and aborts the run), then `go build ./...`. If every build error is an unused
    import, run `gopls imports` on those files and build again.
 8. Parse again and measure `C'`. If tests are enabled, run `go test` on the
    precomputed scope only after the build and measurement succeed.
@@ -524,14 +555,17 @@ candidates are keyed by position, inline candidates by package and function,
 deduplication candidates by the content hash of the repeated run, and `eg`
 candidates by template.
 
-Predicted savings are computed from the AST alone:
+Each prediction comes from a model of the transformation, computed from the
+type-checked AST:
 
-| Kind | Predicted saving |
+| Kind | Model |
 |---|---|
-| Dead code | node count of the function declaration |
-| Inline | declaration nodes − body nodes + 1 |
-| Deduplication | `(k−1)·n − 12 − 3k` for `k` copies of an `n`-node run |
-| `eg` | (`before` nodes − `after` nodes) × number of matches |
+| Dead code | $`\Delta N = -N(D) + \Delta I`$ |
+| Inline | $`\Delta N = N(R) - N(S) - N(D) + \Delta I`$ |
+| Deduplication | $`\Delta N = F + D\,C - (D-1)\,B`$ |
+| `eg` | $`\Delta N = \sum_{m}[\,N(\mathit{after}) - N(\mathit{before}) + \sum_w (a_w - b_w)(N(m_w) - 1)\,] + \Delta I`$ |
+
+The terms are defined in [Appendix A](#appendix-a-transformation-models).
 
 The layers are intentionally separate:
 
@@ -540,16 +574,17 @@ The layers are intentionally separate:
 | Parser | Reads Go files with the standard Go parser, respecting build constraints; generated files are measured and read for references but never edited |
 | Measurer | Counts AST nodes and reports `|AST|` for files and functions |
 | Detector | Finds possible reductions: unreachable plain functions, unexported plain functions referenced exactly once in their package, identical statement runs of at least 12 nodes within one package, and matching `eg` templates |
-| Predictor | Estimates the node saving so candidates can be ordered; this is a ranking, not proof |
+| Predictor | Models each transformation to compute its exact `ΔN`, and refuses the ones the helper tool would get wrong; checked against `test/examples`, but the gate still decides |
 | Refactor tool | Performs the edit. `gopls` inlines the call and extracts the first duplicate; `eg` rewrites every match of one template across the tree. `sx` itself deletes dead functions, deletes an inlined function once nothing refers to it, and replaces the remaining duplicate copies with the call `gopls` generated |
 | Gate | Formats touched files, builds, repairs unused imports, remeasures, and by default tests the precomputed package scope |
 | Reverter | Restores the recorded files whenever the gate fails or the measured tree is not smaller |
 
 The apply step also refuses some edits before the gate runs: an inline whose
 function is still referenced afterwards, is exported, or is named by assembly or
-`//go:linkname`; a deduplication where `gopls` extracts a function that returns
-values; and an `eg` rewrite that touches a generated file or a file outside the
-current build.
+`//go:linkname`; and an `eg` rewrite that touches a generated file or a file
+outside the current build. For a deduplication, the call site `gopls` writes for
+the first copy (declarations, the call, and any return check) is copied to every
+other copy.
 
 The quality of `sx` depends mostly on detection quality and rewrite coverage.
 Better detectors produce fewer doomed candidates and find more real reductions.
@@ -557,6 +592,220 @@ Better predictors waste fewer attempts. A richer, conservative `eg` example
 library gives the tool more AST/type-safe expression rewrites to try. Improving
 `sx` usually means adding one of those: a detector, a predictor filter, or an
 `eg` template that captures a common larger-to-smaller Go idiom.
+
+## Test Examples
+
+`test/examples` is a library of small programs, each isolating one behaviour:
+`<name>_before.go` is the input and `<name>_after.go` is what `sx refactor -apply`
+makes of it. The prefix names the transformation under test (`dead_`, `inline_`,
+`dedup_`, `eg_`). Each file carries `//go:build ignore`, so the examples are not
+part of this module's build.
+
+Two tests use the library:
+
+| Test | What it checks |
+|---|---|
+| `TestModelsMatchReality` (`internal/refactor`) | Every candidate each detector finds in each example, including the ones its model says would grow the tree, is applied for real. The measured `ΔN` must equal the predicted one exactly, and the result must build. |
+| `TestExamples` (`cmd/sx`) | The whole loop runs on each `_before.go` and must produce `_after.go` byte for byte. |
+
+To add an example, write `<name>_before.go`, then generate its expected result
+and review the diff before committing:
+
+```bash
+go test ./cmd/sx -run Examples -update
+git diff test/examples
+```
+
+Both tests need `deadcode`, `gopls`, and `eg`. They are skipped when those are not
+installed, and they run in CI with the pinned versions.
+
+## Appendix A: Transformation Models
+
+Every candidate is priced by a model of what the helper tool will write. Each
+model reconstructs the AST after the transformation and counts nodes; it does
+not estimate from source length. A candidate is offered only when
+$`\Delta N < 0`$, and it is ranked by $`-\Delta N`$.
+
+### A.0 Notation
+
+- $`N(x)`$: the number of `ast.Node` values in the subtree $`x`$, the same count
+  the measure uses.
+- $`\Delta N = N(\text{tree after}) - N(\text{tree before})`$, over the files
+  the measure counts.
+- $`[P]`$: 1 when $`P`$ holds and 0 otherwise.
+- $`T_x`$: the syntax of $`x`$'s type as the tool writes it.
+
+**Imports.** Every transformation can make an import unused, which the repair
+step removes, or need one the file lacks, which `gopls` and `eg` add. Let $`U`$
+be the imports referenced before the change and not after, and $`A`$ the
+packages referenced after it and not imported:
+
+```math
+\Delta I = -\sum_{s \in U} N(s) \;-\; [\text{an import declaration is left empty}]
+\;+\; 2\,|A| \;+\; [A \neq \emptyset \wedge \text{the file has no import declaration}]
+```
+
+An import spec costs 2 nodes (the path literal and the spec), or 3 when it is
+renamed.
+
+### A.1 Dead code
+
+Deleting an unreachable declaration $`D`$ removes it and the imports only it
+used:
+
+```math
+\Delta N_{\text{dead}} = -N(D) + \Delta I
+```
+
+The doc comment is removed too, but comments are not nodes.
+
+### A.2 Inlining
+
+Inlining the only call to $`D`$ replaces the syntax $`S`$ the call occupied with a
+replacement $`R`$, then deletes $`D`$:
+
+```math
+\Delta N_{\text{inline}} = N(R) - N(S) - N(D) + \Delta I
+```
+
+**Substitution.** Parameter $`p`$, with argument $`a_p`$ and $`r_p`$ references in
+the body, is replaced by its argument iff
+
+```math
+\neg\text{assigned}(p) \wedge \neg\text{addressed}(p) \wedge \neg\text{shadowed}(a_p)
+\wedge \big(r_p \le 1 \vee \text{dup}(a_p)\big)
+\wedge \neg\big(r_p = 0 \wedge (\text{effects}(a_p) \vee \text{lastref}(a_p))\big)
+```
+
+where $`\text{dup}`$ holds for identifiers, integer literals, `""`, `0.0`, `1.0`,
+`T{}`, conversions, and selections that do not indirect a pointer. Otherwise
+$`p`$ is kept in the set $`K`$ and bound in a declaration. With $`\pi_p`$ the
+parentheses substitution needs and $`\kappa_p`$ the references at which an
+explicit conversion $`T_p(a_p)`$ is needed, the substitution term is
+
+```math
+\sigma = \sum_{p \notin K} \Big[\, r_p\,\big(N(a_p) - 1\big) + \pi_p + \kappa_p\,\big(1 + N(T_p)\big) \Big]
+```
+
+A conversion is needed at a reference that is not assigned to a value of the
+parameter's type, is assigned to an interface, or feeds type inference, when the
+argument's own type differs from $`T_p`$.
+
+**Binding.** When $`K \neq \emptyset`$, one `var` declaration holds one spec for
+each parameter field $`f`$ with kept names $`K_f`$:
+
+```math
+\beta = 2 + \sum_{f : K_f \neq \emptyset} \Big( 1 + |K_f| + N(T_f) + \sum_{p \in K_f} N(a_p) \Big)
+```
+
+**Strategies.** `gopls` chooses one, which fixes $`R`$ and $`S`$:
+
+| Case | $`S`$ | $`N(R)`$ |
+|---|---|---|
+| Body is `return e`, call in an expression, $`K = \emptyset`$ | the call | $`N(e) + \sigma + [\text{non-trivial}]\,(1 + N(T_r))`$ |
+| Body is `return e`, $`e`$ a call, call is a statement, $`K = \emptyset`$ | the call | $`N(e) + \sigma`$ |
+| Call is a statement; body has no `return`, `defer`, or labels | the statement | $`\sum_i N(s_i) + \sigma + \beta + [\text{clash}]`$ |
+| Empty body, call is a statement | the statement | $`[\,K \neq \emptyset\,]\,\big(1 + \lvert K\rvert + \sum_{p \in K} N(a_p)\big)`$ |
+| Anything else | | refused |
+
+"Non-trivial" means the returned expression's type, or its default type for a
+constant, is not the declared result type $`T_r`$. "Clash" means the inlined
+statements or the binding declare a name the enclosing block already declares,
+so `gopls` keeps the braces. The refused case is literalization,
+`func(...){...}(...)`. It saves only the name and the call's two nodes, and
+leaves an immediately invoked closure where the call was.
+
+### A.3 Extraction (deduplication)
+
+For a run of statements with $`B`$ nodes repeated $`D`$ times, where `gopls`
+extracts the first copy and the call it writes there replaces every copy:
+
+```math
+\Delta N_{\text{extract}} = F + D\,C - (D - 1)\,B
+```
+
+$`F`$ is what the new declaration adds besides the body it takes over, and
+$`C`$ is what replaces each copy. They follow from the run's variables and
+control flow:
+
+- $`P`$: **parameters**. Variables declared before the run and read in it.
+- $`V`$: **results**. Variables the run declares or assigns whose value the
+  code after the run reads before overwriting it.
+- $`Q`$: **return plumbing**. When the run contains `return`, the enclosing
+  function's results, plus a `bool` flag unless every return is
+  `if err != nil { return ..., err }`.
+- $`n_{ret}`$: the `return` statements in the run.
+- $`\tau`$: the run ends in a top-level `return`, so it always returns.
+- $`\epsilon`$: every return in the run is an error check.
+- $`Z(T)`$: the size of $`T`$'s zero value. It is 1 for `0`, `""`, `false`, or
+  `nil`; $`1 + N(T)`$ for `T{}`; and 4 for `*new(T)`.
+
+The declaration is `func newFunction(p T, ...) (R, ...) { body }`, with a
+`return` appended when values come back, and every return in the body padded
+with zero values:
+
+```math
+\begin{aligned}
+F ={}& 5 + \sum_{p \in P} \big(2 + N(T_p)\big)
+ + \big[|V| + |Q| > 0\big]\Big(1 + \sum_{v \in V}\big(1 + N(T_v)\big) + \sum_{q \in Q}\big(1 + N(T_q)\big)\Big) \\
+ &+ \big[|V| + |Q| > 0 \wedge \neg\tau\big]\Big(1 + |V| + \sum_{q \in Q} Z(T_q)\Big)
+ + \big[\,n_{ret} > 0 \wedge \neg\tau\,\big]\; n_{ret}\Big(\sum_{v \in V} Z(T_v) + [\neg\epsilon]\Big)
+\end{aligned}
+```
+
+The call site is the call, an assignment when values come back, and the check
+that carries a return out. When the assignment cannot use `:=` (some result was
+declared before the run, in a scope it cannot be redeclared in), `gopls` first
+declares with `var` the set $`L`$: the results the run declares, together with
+$`Q`$.
+
+```math
+C = \underbrace{1 + (2 + |P|)}_{\text{statement and call}}
+ + \big[\neg\tau\big]\,\big(|V| + |Q|\big)
+ + [\text{no }{:=}]\sum_{t \in L}\big(4 + N(t)\big)
+ + \begin{cases}
+ 6 + |Q| & \text{if } \epsilon \wedge \neg\tau \quad (\texttt{if err != nil \{ return ... \}}) \\
+ 4 + |Q| - 1 & \text{if } n_{ret} > 0 \wedge \neg\epsilon \wedge \neg\tau \quad (\texttt{if shouldReturn \{ return ... \}}) \\
+ 0 & \text{otherwise}
+ \end{cases}
+```
+
+In the flag case, $`|Q| - 1`$ counts the enclosing function's results, without
+the flag. With $`\tau`$ the call site is `return newFunction(...)`.
+
+The model refuses a run, and it is never offered, when `gopls` would extract it
+into code that does not compile or that behaves differently:
+
+| Refusal | Why |
+|---|---|
+| A parameter or result has its address taken in the run, by `&v`, a pointer method, or a closure | `gopls` passes and returns by value, so whatever holds the address keeps the helper's copy |
+| A write in the run is not returned, but a loop or closure reads it later | The write lands on the helper's copy and is lost |
+| A `break`, `continue`, or `goto` leaves the run | `gopls` threads it through a control value, which is not modelled |
+| The signature needs a type parameter | `gopls` does not carry the enclosing function's type parameters over |
+| The signature names a package the file does not import | `gopls` does not add the import |
+| Two parameters would share a name | A type switch declares its variable once per clause |
+
+### A.4 `eg` rewrites
+
+A template rewrites `before(w...)` to `after(w...)`. Each match $`m`$ binds each
+wildcard $`w`$ to an expression $`m_w`$ whose type is assignable to $`w`$'s. With
+$`b_w`$ and $`a_w`$ the number of times $`w`$ appears in `before` and in `after`:
+
+```math
+\Delta N_{\text{eg}} = \sum_{m \in M} \Big[\, N(\mathit{after}) - N(\mathit{before}) + \sum_{w} (a_w - b_w)\,\big(N(m_w) - 1\big) \Big] + \Delta I
+```
+
+Here $`M`$ is the set of matches in files the measure counts. `eg` also rewrites
+tests, but the measure does not see them. `eg` adds the imports `after` needs,
+and the repair step removes the ones `before` no longer uses.
+
+### A.5 Validation
+
+The models follow `gopls` v0.23.0 and `golang.org/x/tools` v0.50.0 (`eg`,
+`deadcode`). `TestModelsMatchReality` applies every candidate in `test/examples`
+and requires the measured $`\Delta N`$ to equal the prediction. At the time of
+writing that is 55 real transformations with no mismatch: 37 extractions, 9
+inlines, 6 `eg` rewrites, and 3 dead-code removals.
 
 ## License
 

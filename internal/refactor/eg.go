@@ -4,16 +4,12 @@ import (
 	"bytes"
 	"fmt"
 	"go/ast"
-	"go/parser"
-	"go/token"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
-
-	"github.com/dhilst/sx/internal/cost"
 )
 
 // EgTemplates returns the example rewrite templates in paths.
@@ -62,15 +58,28 @@ func EgTemplates(paths []string) ([]string, error) {
 	return out, nil
 }
 
-// EgCandidates asks eg which templates match this tree, then prices each
-// template by the expression nodes it removes per match.
+// EgCandidates asks eg which templates match this tree, and has the model
+// price each one over every match.
 func EgCandidates(egPath, dir string, templates []string) ([]Candidate, error) {
+	all, err := egRewrites(egPath, dir, templates)
+	if err != nil {
+		return nil, err
+	}
 	var out []Candidate
-	for _, tmpl := range templates {
-		delta, err := egTemplateDelta(tmpl)
-		if err != nil || delta <= 0 {
-			continue
+	for _, c := range all {
+		if c.Predicted > 0 {
+			out = append(out, c)
 		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
+	return out, nil
+}
+
+// egRewrites is every template eg finds a match for, priced by the model.
+func egRewrites(egPath, dir string, templates []string) ([]Candidate, error) {
+	var out []Candidate
+	ps := packages{}
+	for _, tmpl := range templates {
 		matches, firstFile, err := func() (int, string, error) {
 			cmd := exec.Command(egPath, "-t", tmpl, "./...")
 			cmd.Dir = dir
@@ -85,14 +94,17 @@ func EgCandidates(egPath, dir string, templates []string) ([]Candidate, error) {
 		if err != nil || matches == 0 {
 			continue
 		}
+		model, err := predictEg(ps, dir, tmpl)
+		if err != nil {
+			continue
+		}
 		name := strings.TrimSuffix(filepath.Base(tmpl), filepath.Ext(tmpl))
 		out = append(out, Candidate{
-			Kind: KindEg, File: firstFile, Target: name, Predicted: delta * matches,
-			Template: tmpl,
-			Detail:   fmt.Sprintf("%s matches %d expression(s); template saves about %d nodes each", filepath.Base(tmpl), matches, delta),
+			Kind: KindEg, File: firstFile, Target: name, Predicted: -model.Delta(),
+			Template: tmpl, model: model,
+			Detail: fmt.Sprintf("%s matches %d expression(s): %s", filepath.Base(tmpl), matches, model),
 		})
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
 	return out, nil
 }
 
@@ -124,23 +136,6 @@ func parseEgMatches(dir, stderr string) (int, string, error) {
 		total += n
 	}
 	return total, firstFile, nil
-}
-
-func egTemplateDelta(path string) (int, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		return 0, err
-	}
-	before, err := templateExpr(f, "before")
-	if err != nil {
-		return 0, err
-	}
-	after, err := templateExpr(f, "after")
-	if err != nil {
-		return 0, err
-	}
-	return cost.Count(before) - cost.Count(after), nil
 }
 
 func templateExpr(f *ast.File, name string) (ast.Node, error) {

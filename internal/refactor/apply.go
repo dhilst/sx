@@ -7,7 +7,6 @@ import (
 	"go/ast"
 	"go/format"
 	"go/parser"
-	"go/printer"
 	"go/token"
 	"os"
 	"os/exec"
@@ -197,14 +196,7 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 				}
 				originals[o.File] = b
 			}
-			return originals, func() error {
-				for path, b := range originals {
-					if err := os.WriteFile(path, b, 0o644); err != nil {
-						return err
-					}
-				}
-				return nil
-			}, nil
+			return originals, func() error { return writeAll(originals) }, nil
 		}()
 		if err != nil {
 			return nil, err
@@ -253,14 +245,10 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 			restore()
 			return nil, fmt.Errorf("gopls extracted nothing at %s", spec)
 		}
-		call, bare, err := callSite(first.File, name)
+		call, err := callSite(originals[first.File], first, first.File, name)
 		if err != nil {
 			restore()
 			return nil, fmt.Errorf("could not find the call gopls generated: %w", err)
-		}
-		if !bare {
-			restore()
-			return nil, fmt.Errorf("gopls extracted %s as returning values, so the copies cannot be replaced by a call", name)
 		}
 		replaced := 0
 		for _, path := range func() []string {
@@ -321,12 +309,7 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 				}
 				formatted, err := format.Source([]byte(out))
 				if err != nil {
-					return 0, fmt.Errorf("replacing copies in %s left the file unparseable: %w", filepath.Base(path), func() error {
-						if s := firstLine(err.Error()); s != "" {
-							return errors.New(s)
-						}
-						return err
-					}())
+					return 0, fmt.Errorf("replacing copies in %s left the file unparseable: %w", filepath.Base(path), firstErr(err))
 				}
 				if err := os.WriteFile(path, formatted, 0o644); err != nil {
 					return 0, err
@@ -370,14 +353,7 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 				}
 				originals[path] = b
 			}
-			return originals, func() error {
-				for path, b := range originals {
-					if err := os.WriteFile(path, b, 0o644); err != nil {
-						return err
-					}
-				}
-				return nil
-			}, nil
+			return originals, func() error { return writeAll(originals) }, nil
 		}()
 		if err != nil {
 			return nil, err
@@ -423,6 +399,16 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 	default:
 		return nil, fmt.Errorf("no transformation for %q", c.Kind)
 	}
+}
+
+// writeAll puts files back as they were.
+func writeAll(files map[string][]byte) error {
+	for path, b := range files {
+		if err := os.WriteFile(path, b, 0o644); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // removeDecl deletes a function declaration and the doc comment that belongs
@@ -538,49 +524,95 @@ func outside(runs []Occurrence, start, end int) []Occurrence {
 	return out
 }
 
-// callSite prints the statement that calls the extracted function, which is
-// what every other copy is replaced by. The second result reports whether that
-// statement is a bare call rather than one that takes values out of it.
-func callSite(path, name string) (string, bool, error) {
-	fset := token.NewFileSet()
-	f, err := parser.ParseFile(fset, path, nil, 0)
-	if err != nil {
-		return "", false, err
-	}
-	var found ast.Stmt
-	ast.Inspect(f, func(n ast.Node) bool {
-		if found != nil {
-			return false
-		}
-		stmt, ok := n.(ast.Stmt)
-		if !ok {
-			return true
-		}
-		calls := false
-		ast.Inspect(stmt, func(x ast.Node) bool {
-			if call, ok := x.(*ast.CallExpr); ok {
-				if id, ok := call.Fun.(*ast.Ident); ok && id.Name == name {
-					calls = true
-				}
+// callSite is the text gopls put where the first copy was: the call, and
+// whatever it needs around it - declarations before it, a check of a returned
+// flag or error after it. The copies are identical, so the same text is what
+// replaces each of them.
+//
+// It is found by structure rather than by diffing text: the run was
+// statements i..j of a list, and after the extraction the same list has the
+// statements before i and after j unchanged, with the replacement between.
+func callSite(original []byte, o Occurrence, path, name string) (string, error) {
+	lists := func(f *ast.File) [][]ast.Stmt {
+		var out [][]ast.Stmt
+		ast.Inspect(f, func(n ast.Node) bool {
+			switch s := n.(type) {
+			case *ast.BlockStmt:
+				out = append(out, s.List)
+			case *ast.CaseClause:
+				out = append(out, s.Body)
 			}
 			return true
 		})
-		if calls {
-			if _, isBlock := stmt.(*ast.BlockStmt); !isBlock {
-				found = stmt
+		return out
+	}
+	fset := token.NewFileSet()
+	before, err := parser.ParseFile(fset, path, original, 0)
+	if err != nil {
+		return "", err
+	}
+	i, tail := -1, 0
+	for _, list := range lists(before) {
+		for a, s := range list {
+			if fset.Position(s.Pos()).Offset != o.StartOffset {
+				continue
+			}
+			for b := a; b < len(list); b++ {
+				if fset.Position(list[b].End()).Offset == o.EndOffset {
+					i, tail = a, len(list)-b-1
+				}
 			}
 		}
-		return true
-	})
-	if found == nil {
-		return "", false, fmt.Errorf("no call to %s", name)
 	}
-	var buf bytes.Buffer
-	if err := printer.Fprint(&buf, fset, found); err != nil {
-		return "", false, err
+	if i < 0 {
+		return "", fmt.Errorf("the run is not a statement list in %s", filepath.Base(path))
 	}
-	_, bare := found.(*ast.ExprStmt)
-	return buf.String(), bare, nil
+	src, err := os.ReadFile(path)
+	if err != nil {
+		return "", err
+	}
+	fset = token.NewFileSet()
+	after, err := parser.ParseFile(fset, path, src, 0)
+	if err != nil {
+		return "", err
+	}
+	calls := func(s ast.Stmt) bool {
+		var x ast.Expr
+		switch s := s.(type) {
+		case *ast.ExprStmt:
+			x = s.X
+		case *ast.AssignStmt:
+			if len(s.Rhs) == 1 {
+				x = s.Rhs[0]
+			}
+		case *ast.ReturnStmt:
+			if len(s.Results) == 1 {
+				x = s.Results[0]
+			}
+		}
+		call, ok := x.(*ast.CallExpr)
+		if !ok {
+			return false
+		}
+		id, ok := call.Fun.(*ast.Ident)
+		return ok && id.Name == name
+	}
+	for _, list := range lists(after) {
+		k := len(list) - tail
+		if i >= k {
+			continue
+		}
+		for _, s := range list[i:k] {
+			if !calls(s) {
+				continue
+			}
+			start, end := fset.Position(list[i].Pos()), fset.Position(list[k-1].End())
+			line := string(src[strings.LastIndexByte(string(src[:start.Offset]), '\n')+1 : start.Offset])
+			indent := line[:len(line)-len(strings.TrimLeft(line, " \t"))]
+			return strings.ReplaceAll(string(src[start.Offset:end.Offset]), "\n"+indent, "\n"), nil
+		}
+	}
+	return "", fmt.Errorf("no call to %s", name)
 }
 
 // firstErr reduces a parser's error list to the first line, which is the one

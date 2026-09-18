@@ -2,6 +2,7 @@ package refactor
 
 import (
 	"bytes"
+	"crypto/sha256"
 	"fmt"
 	"go/format"
 	"os"
@@ -9,7 +10,6 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
-	"time"
 )
 
 // A failed build is information, not just a verdict.
@@ -105,6 +105,32 @@ func Repair(dir string) (bool, error) {
 	return len(after) == 0, nil
 }
 
+// Snapshot is what each editable file held before a change, by content hash,
+// so Format can tell afterwards which files the change wrote.
+//
+// It used to compare modification times against the moment the change
+// started. The kernel stamps files from a coarse clock, so a file written
+// just after that moment can carry a time just before it: the loop deleted
+// a dead function and left the blank lines around it unformatted.
+type Snapshot map[string][sha256.Size]byte
+
+// Stamp records the editable files under dir.
+func Stamp(dir string) (Snapshot, error) {
+	files, err := editableFilesIn(dir)
+	if err != nil {
+		return nil, err
+	}
+	s := Snapshot{}
+	for _, path := range files {
+		b, err := os.ReadFile(path)
+		if err != nil {
+			return nil, err
+		}
+		s[path] = sha256.Sum256(b)
+	}
+	return s, nil
+}
+
 // Format puts the tree back into gofmt form.
 //
 // gopls inlines a call by pasting the body in without re-indenting it, which
@@ -112,22 +138,25 @@ func Repair(dir string) (bool, error) {
 // being independent of formatting is the point of the measure - and the build
 // and the tests do not care either, so a change like that passes every gate.
 // The only thing that notices is a human, or CI.
-func Format(dir string, since time.Time) error {
+//
+// Only the files that differ from before are formatted; a nil snapshot
+// formats every file.
+func Format(dir string, before Snapshot) error {
 	files, err := editableFilesIn(dir)
 	if err != nil {
 		return err
 	}
 	for _, path := range files {
-		// Only what this change touched. Formatting the whole tree rewrites
-		// files the change never went near, and the revert restores only the
-		// ones it wrote - so a rejected change would still leave those
-		// reformatted, with nothing to undo them.
-		if st, err := os.Stat(path); err != nil || st.ModTime().Before(since) {
-			continue
-		}
 		src, err := os.ReadFile(path)
 		if err != nil {
 			return err
+		}
+		// Only what this change touched. Formatting the whole tree
+		// rewrites files the change never went near, and the revert
+		// restores only the ones it wrote - so a rejected change would
+		// still leave those reformatted, with nothing to undo them.
+		if h, ok := before[path]; ok && h == sha256.Sum256(src) {
+			continue
 		}
 		// A file that does not parse is not a formatting problem; the build
 		// gate is what should report it.
