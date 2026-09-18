@@ -186,9 +186,9 @@ Without `-apply`, `sx refactor` only reports the best candidate it would try.
 go tool sx refactor -apply -n 30 .
 ```
 
-For each attempted change, `sx` formats and repairs imports, rebuilds, runs the
-relevant tests, re-counts nodes, and reverts the change unless the final count is
-smaller.
+For each attempted change, `sx` formats, rebuilds and repairs unused imports,
+re-counts nodes, runs the relevant tests, and reverts the change unless it builds,
+the tests pass, and the final count is smaller.
 
 ### 4. Review before committing
 
@@ -256,9 +256,10 @@ only if the build, tests, and measured AST count all pass.
 
 ### Inlining
 
-`sx` finds small functions that appear to be used once, then asks `gopls` to run
-the actual inline refactor. `gopls` owns the type-aware edit; `sx` owns the
-decision about whether the resulting patch is smaller and still valid.
+`sx` finds unexported plain functions that are called exactly once in their
+package, then asks `gopls` to run the actual inline refactor and deletes the
+declaration once nothing refers to it. `gopls` owns the type-aware edit; `sx`
+owns the decision about whether the resulting patch is smaller and still valid.
 
 ### Deduplication
 
@@ -281,11 +282,11 @@ Every attempted change follows this loop:
 
 1. choose the highest predicted saving not already tried
 2. apply the candidate
-3. format and repair imports
-4. rebuild the package
-5. run the packages that could be affected
-6. count AST nodes again
-7. keep the change only if the count went down
+3. format the touched files
+4. rebuild, repairing unused imports if that is the only problem
+5. count AST nodes again
+6. run the tests of the packages that could be affected
+7. keep the change only if it builds, the tests pass, and the count went down
 
 The predicted saving only decides what to try first. The final measured count is
 what decides whether the change stays.
@@ -445,7 +446,7 @@ Useful flags:
 | `-n` | measure | Number of functions to list; `0` lists all |
 | `-tests` | measure | Include `_test.go` files when measuring |
 | `-apply` | refactor | Write accepted changes; without it, preview one candidate |
-| `-check` | refactor | Exit non-zero when a shrinking candidate is found; never writes files |
+| `-check` | refactor | Exit non-zero when a shrinking candidate is found; never writes files; cannot be combined with `-apply` |
 | `-n` | refactor | Number of candidates to attempt; default is `10` |
 | `-test=false` | refactor | Skip tests after each accepted-looking change |
 | `-eg` | refactor | File or directory of `eg` templates; repeatable |
@@ -483,6 +484,79 @@ jobs:
 | A candidate appears in `-check` but is not kept by `-apply` | This is expected when the real gates reject the change or the measured count does not improve |
 | The diff is too broad | Restore the tree and rerun with a smaller `-n` |
 | A rewrite looks smaller but less readable | Reject it; `sx` optimizes for AST size, not taste |
+
+## Algorithm and Layers
+
+The minimization loop is greedy and measurement-gated:
+
+1. Parse the current Go files and measure the tree as `C = |AST|`. The measure
+   covers non-test `.go` files that match the current build constraints,
+   skipping `vendor`, `testdata`, and directories starting with `.` or `_`.
+   `_test.go` files are not counted.
+2. Compute the test scope once: the package in the target directory plus every
+   package in its module that depends on it, directly or transitively. If
+   `go list` cannot answer, the scope falls back to `./...` under the target.
+3. For each attempt, run the available detectors fresh against the current tree,
+   in this order: `deadcode`, inline, deduplication (both need `gopls`), and `eg`
+   templates. A detector that errors contributes no candidates.
+4. Attach each candidate to a predicted saving and pick the one with the
+   highest positive prediction whose key has not already been tried; ties go to
+   the earlier detector. The chosen key is marked as tried whatever the outcome.
+5. Without `-apply`, report that candidate and stop without writing. With
+   `-check`, report it and exit non-zero. If no candidate remains, both modes
+   exit successfully. `-check` and `-apply` are rejected together before
+   anything is measured or written.
+6. With `-apply`, apply one candidate to the working tree. If the edit cannot be
+   produced or is rejected by the apply step's own checks, report it as skipped
+   and continue; a skipped candidate still counts as an attempt.
+7. gofmt the files the change touched (a formatting failure reverts the change
+   and aborts the run), then `go build ./...`. If every build error is an unused
+   import, run `gopls imports` on those files and build again.
+8. Parse again and measure `C'`. If tests are enabled, run `go test` on the
+   precomputed scope only after the build and measurement succeed.
+9. Keep the change iff it builds, tests pass, and `C' < C`. Otherwise, restore
+   the files the apply step recorded.
+10. If kept, set `C = C'`. Either way, redetect candidates on the next attempt
+    and repeat until no candidate remains or `-n` attempts have been made.
+
+Candidate keys make retries stable across edits that move code: dead-code
+candidates are keyed by position, inline candidates by package and function,
+deduplication candidates by the content hash of the repeated run, and `eg`
+candidates by template.
+
+Predicted savings are computed from the AST alone:
+
+| Kind | Predicted saving |
+|---|---|
+| Dead code | node count of the function declaration |
+| Inline | declaration nodes − body nodes + 1 |
+| Deduplication | `(k−1)·n − 12 − 3k` for `k` copies of an `n`-node run |
+| `eg` | (`before` nodes − `after` nodes) × number of matches |
+
+The layers are intentionally separate:
+
+| Layer | Responsibility |
+|---|---|
+| Parser | Reads Go files with the standard Go parser, respecting build constraints; generated files are measured and read for references but never edited |
+| Measurer | Counts AST nodes and reports `|AST|` for files and functions |
+| Detector | Finds possible reductions: unreachable plain functions, unexported plain functions referenced exactly once in their package, identical statement runs of at least 12 nodes within one package, and matching `eg` templates |
+| Predictor | Estimates the node saving so candidates can be ordered; this is a ranking, not proof |
+| Refactor tool | Performs the edit. `gopls` inlines the call and extracts the first duplicate; `eg` rewrites every match of one template across the tree. `sx` itself deletes dead functions, deletes an inlined function once nothing refers to it, and replaces the remaining duplicate copies with the call `gopls` generated |
+| Gate | Formats touched files, builds, repairs unused imports, remeasures, and by default tests the precomputed package scope |
+| Reverter | Restores the recorded files whenever the gate fails or the measured tree is not smaller |
+
+The apply step also refuses some edits before the gate runs: an inline whose
+function is still referenced afterwards, is exported, or is named by assembly or
+`//go:linkname`; a deduplication where `gopls` extracts a function that returns
+values; and an `eg` rewrite that touches a generated file or a file outside the
+current build.
+
+The quality of `sx` depends mostly on detection quality and rewrite coverage.
+Better detectors produce fewer doomed candidates and find more real reductions.
+Better predictors waste fewer attempts. A richer, conservative `eg` example
+library gives the tool more AST/type-safe expression rewrites to try. Improving
+`sx` usually means adding one of those: a detector, a predictor filter, or an
+`eg` template that captures a common larger-to-smaller Go idiom.
 
 ## License
 

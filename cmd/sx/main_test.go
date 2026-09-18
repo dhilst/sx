@@ -1,9 +1,11 @@
 package main
 
 import (
+	"io"
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -48,5 +50,25 @@ func TestGoFilesSkipsBuildIgnoredFiles(t *testing.T) {
 	}
 	if !reflect.DeepEqual(got, []string{ordinary}) {
 		t.Fatalf("files = %v, want only %s", got, ordinary)
+	}
+}
+
+func TestRefactorCheckRejectsApply(t *testing.T) {
+	dir := t.TempDir()
+	src := filepath.Join(dir, "p.go")
+	orig := []byte("package p\n\nfunc unused() {}\n")
+	if err := os.WriteFile(src, orig, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	err := run([]string{"refactor", "-check", "-apply", dir}, io.Discard, io.Discard)
+	if err == nil || !strings.Contains(err.Error(), "cannot be combined") {
+		t.Fatalf("err = %v, want -check/-apply rejection", err)
+	}
+	got, err := os.ReadFile(src)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !reflect.DeepEqual(got, orig) {
+		t.Fatalf("file changed:\n%s", got)
 	}
 }

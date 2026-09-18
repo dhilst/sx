@@ -45,6 +45,11 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err := fs.Parse(args); err != nil {
 			return err
 		}
+		// -check promises never to write to the tree, and -apply is nothing
+		// but writing to it. Honouring either one silently breaks the other.
+		if *check && *apply {
+			return fmt.Errorf("-check and -apply cannot be combined: -check never writes files")
+		}
 		dir := "."
 		if fs.NArg() > 0 {
 			dir = fs.Arg(0)
