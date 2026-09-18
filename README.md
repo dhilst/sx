@@ -9,9 +9,17 @@ code by counting AST nodes, detects refactoring candidates, applies them one at
 a time, and keeps only changes that still build, pass tests, and make the
 measured program smaller.
 
-Use `sx` as a patch generator, not as an automatic cleanup tool. It optimizes
-for small code, so you should review every diff and keep only the changes that
-also make the code easier to maintain.
+Every change `sx` makes is a type-aware AST transformation performed by a
+maintained Go tool: `gopls` for inlining and extraction, `eg` for
+example-based rewrites, and `deadcode` for reachability. Before a change is
+tried, `sx` predicts it and refuses the patterns the tool cannot transform
+correctly. After a change, `sx` gofmts it, builds it, runs the tests of every
+package that could be affected, and measures it. A change that fails any of
+these steps is reverted, so every change `sx` keeps builds and passes the tests.
+
+`sx` optimizes for small code, so review its diff the way you review any
+refactoring, for naming and style. Correctness comes from the type-aware tools
+and the gates, not from the review.
 
 It is intended to be used inside a coding agent through a skill, after an
 implementation round, before push as a git hook, or inside CI. You can also run
@@ -103,10 +111,21 @@ Use `sx` when you want to:
 - apply small, example-based expression rewrites with `eg`
 - fail CI when a shrinking candidate is available
 
-Do **not** treat `sx` as proof that a change is behavior-preserving. The build,
-test, and measurement gates catch many bad rewrites, but public APIs,
-timing-sensitive code, exact error values, reflection, and side effects still
-need human review.
+## How sx Keeps Changes Safe
+
+Safety comes in layers, and each one can only reject a change:
+
+| Layer | What it guarantees |
+|---|---|
+| Type-aware tools | Edits are made on the type-checked AST, never by text substitution. `gopls` preserves semantics when it inlines or extracts: it binds arguments that cannot be substituted and keeps conversions explicit. `eg` rewrites only expressions whose types match the template |
+| Conservative scope | Only unexported functions are inlined, only unreachable functions are removed, and only identical code within one package is deduplicated. Generated files and files outside the current build are never edited. Inlining also skips functions that carry `//go:` directives, use `unsafe`, or are named by assembly or `//go:linkname` |
+| Predictor refusals | Patterns the tools get wrong are refused before anything is written, such as values copied after their address is taken, lost loop-carried writes, and control flow that leaves an extracted run. See [Appendix A](#appendix-a-transformation-models) |
+| Gates | Each change must parse, gofmt, build, and pass the tests of its package and every package that imports it |
+| Revert | A change that fails any gate, or does not make the tree smaller, is undone before the next one is tried |
+| Read-only CI mode | `-check` never writes, and `-check -apply` is rejected |
+
+The tests are the final word on behaviour, so the stronger your test suite, the
+stronger that guarantee.
 
 ## Install
 
@@ -197,7 +216,9 @@ go test ./...
 git diff
 ```
 
-Keep the patch only if it is smaller **and** clearer for future maintainers.
+Every change in the diff has already been built and tested. What remains is a
+style review: keep the changes that read well, and drop any you would name or
+structure differently.
 
 ## Typical Workflows
 
@@ -210,7 +231,7 @@ go test ./...
 git diff
 ```
 
-If the diff is too aggressive, discard it and run fewer attempts:
+To review the changes in smaller batches, run fewer attempts at a time:
 
 ```bash
 git restore .
@@ -226,8 +247,8 @@ It never writes files.
 go tool sx refactor -check -n 30 .
 ```
 
-A `-check` candidate is only a prediction. The same candidate may be rejected by
-`-apply` after the real build, test, and measurement gates run.
+A `-check` candidate is a prediction from the transformation models. `-apply`
+then confirms it with the real build, test, and measurement gates.
 
 ### Disable tests for a fast exploratory run
 
@@ -235,7 +256,8 @@ A `-check` candidate is only a prediction. The same candidate may be rejected by
 go tool sx refactor -apply -test=false -n 30 .
 ```
 
-Use this only for exploration. Run the full test suite before keeping the patch.
+This skips the per-change test gate, which makes the loop faster. Run
+`go test ./...` once at the end to restore the same guarantee.
 
 ## What sx Changes
 
@@ -509,9 +531,9 @@ wrong results: the measured count still decides.
 |---|---|
 | `sx refactor` says helper tools are missing | Install at least one of `deadcode`, `gopls`, or `eg` |
 | `eg` templates are ignored | Confirm `eg` is installed and templates are in a searched path or passed with `-eg` |
-| A candidate appears in `-check` but is not kept by `-apply` | This is expected when the real gates reject the change or the measured count does not improve |
-| The diff is too broad | Restore the tree and rerun with a smaller `-n` |
-| A rewrite looks smaller but less readable | Reject it; `sx` optimizes for AST size, not taste |
+| A candidate appears in `-check` but is not kept by `-apply` | A gate rejected it and `sx` reverted it; the tree is unchanged |
+| The diff is larger than you want to review at once | Rerun with a smaller `-n` |
+| A change is smaller but reads worse | Drop it from the diff; `sx` optimizes for size, and naming and style are yours |
 
 ## Algorithm and Layers
 
@@ -636,7 +658,9 @@ $`\Delta N < 0`$, and it is ranked by $`-\Delta N`$.
 - $`T_x`$: the syntax of $`x`$'s type as the tool writes it.
 
 **Imports.** Every transformation can make an import unused, which the repair
-step removes, or need one the file lacks, which `gopls` and `eg` add. Let $`U`$
+step removes, or need one the file lacks, which `gopls` and `eg` add.
+$`\Delta I`$ is the resulting signed change in nodes: negative when imports go,
+positive when they arrive. Let $`U`$
 be the imports referenced before the change and not after, and $`A`$ the
 packages referenced after it and not imported:
 
@@ -651,13 +675,18 @@ renamed.
 ### A.1 Dead code
 
 Deleting an unreachable declaration $`D`$ removes it and the imports only it
-used:
+used. Deleting code can only remove imports, never add them, so $`A = \emptyset`$
+and the import term is never positive:
 
 ```math
 \Delta N_{\text{dead}} = -N(D) + \Delta I
+= -N(D) - \sum_{s \in U} N(s) - [\text{an import declaration is left empty}]
 ```
 
-The doc comment is removed too, but comments are not nodes.
+$`\Delta I`$ is a signed change in nodes, not a count of imports, so it is added
+rather than subtracted. For example, deleting a 10-node function that was the
+only user of `"strings"` gives $`\Delta N = -10 + (-2) = -12`$. The doc comment is
+removed too, but comments are not nodes.
 
 ### A.2 Inlining
 
@@ -698,15 +727,37 @@ each parameter field $`f`$ with kept names $`K_f`$:
 \beta = 2 + \sum_{f : K_f \neq \emptyset} \Big( 1 + |K_f| + N(T_f) + \sum_{p \in K_f} N(a_p) \Big)
 ```
 
-**Strategies.** `gopls` chooses one, which fixes $`R`$ and $`S`$:
+**Strategies.** `gopls` chooses one strategy, which fixes $`S`$ and $`R`$:
 
-| Case | $`S`$ | $`N(R)`$ |
-|---|---|---|
-| Body is `return e`, call in an expression, $`K = \emptyset`$ | the call | $`N(e) + \sigma + [\text{non-trivial}]\,(1 + N(T_r))`$ |
-| Body is `return e`, $`e`$ a call, call is a statement, $`K = \emptyset`$ | the call | $`N(e) + \sigma`$ |
-| Call is a statement; body has no `return`, `defer`, or labels | the statement | $`\sum_i N(s_i) + \sigma + \beta + [\text{clash}]`$ |
-| Empty body, call is a statement | the statement | $`[\,K \neq \emptyset\,]\,\big(1 + \lvert K\rvert + \sum_{p \in K} N(a_p)\big)`$ |
-| Anything else | | refused |
+1. **Returned expression.** The body is `return e` and the call is inside an
+   expression, with $`K = \emptyset`$. $`S`$ is the call:
+
+   ```math
+   N(R) = N(e) + \sigma + [\text{non-trivial}]\,\big(1 + N(T_r)\big)
+   ```
+
+2. **Returned call as a statement.** The body is `return e`, $`e`$ is itself a
+   call, and the call is a statement, with $`K = \emptyset`$. $`S`$ is the call:
+
+   ```math
+   N(R) = N(e) + \sigma
+   ```
+
+3. **Statements.** The call is a statement, and the body has no `return`,
+   `defer`, or labels. $`S`$ is the whole call statement:
+
+   ```math
+   N(R) = \sum_i N(s_i) + \sigma + \beta + [\text{clash}]
+   ```
+
+4. **Empty body.** The call is a statement. $`S`$ is the statement, and only
+   arguments with effects survive:
+
+   ```math
+   N(R) = [K \neq \emptyset]\,\Big(1 + |K| + \sum_{p \in K} N(a_p)\Big)
+   ```
+
+5. **Anything else** is refused.
 
 "Non-trivial" means the returned expression's type, or its default type for a
 constant, is not the declared result type $`T_r`$. "Clash" means the inlined
