@@ -989,3 +989,38 @@ func TestStatementsDifferingOnlyInATokenHashApart(t *testing.T) {
 		}
 	}
 }
+
+// A dead function another package's dead function still calls is offered
+// only after its caller has gone; deleting it first breaks the build.
+func TestDeadCalleeInAnotherPackageWaitsForItsCaller(t *testing.T) {
+	deadcode, ok := Tool("deadcode")
+	if !ok {
+		t.Skip("deadcode is not installed")
+	}
+	root := t.TempDir()
+	for name, src := range map[string]string{
+		"go.mod":  "module m\n\ngo 1.25\n",
+		"main.go": "package main\n\nimport _ \"m/b\"\n\nfunc main() {}\n",
+		"a/a.go":  "package a\n\nfunc New() int { return 1 }\n",
+		"b/b.go":  "package b\n\nimport \"m/a\"\n\nfunc Use() int { return a.New() + 1 }\n",
+	} {
+		path := filepath.Join(root, name)
+		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.WriteFile(path, []byte(src), 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cs, err := DeadCandidates(deadcode, root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var names []string
+	for _, c := range cs {
+		names = append(names, c.Target)
+	}
+	if len(names) != 1 || !strings.HasSuffix(names[0], "Use") {
+		t.Fatalf("offered %v, want only b.Use, whose callee must wait for it", names)
+	}
+}

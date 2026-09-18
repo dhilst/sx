@@ -92,7 +92,7 @@ func (tp *typedPackage) usesOf(obj types.Object) []*ast.Ident {
 
 // check type-checks the package. Imports are read from export data, the
 // same thing the compiler reads, listed once per pass by Cache.Begin.
-func (tp *typedPackage) check(exports map[string]string) (err error) {
+func (tp *typedPackage) check(exports map[string]string, path string) (err error) {
 	// The importer panics on export data newer than the Go that built sx:
 	// flowstate needs Go 1.27, and sx built with 1.25 cannot read what its
 	// toolchain writes. A package that cannot be type-checked is left out of
@@ -131,7 +131,13 @@ func (tp *typedPackage) check(exports map[string]string) (err error) {
 	if len(files) == 0 {
 		return fmt.Errorf("no files")
 	}
-	pkg, err := conf.Check(files[0].Name.Name, tp.fset, files, tp.info)
+	// Checked under its import path, so its objects are the ones an
+	// importer sees; a bare package name made m/a's New a different
+	// function from the a.New that m/b calls.
+	if path == "" {
+		path = files[0].Name.Name
+	}
+	pkg, err := conf.Check(path, tp.fset, files, tp.info)
 	if pkg == nil {
 		return err
 	}

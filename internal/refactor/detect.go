@@ -168,7 +168,7 @@ func (c *Cache) Dead(deadcodePath, dir string) ([]Candidate, error) {
 		if decl == nil {
 			continue // gone since deadcode was asked
 		}
-		if calledByDead(tp, decl, deadNames[filepath.Dir(file)]) {
+		if calledByDead(tp, decl, deadNames[filepath.Dir(file)]) || c.calledByDeadElsewhere(tp, decl, filepath.Dir(file), deadNames) {
 			// Deleting a dead function another dead function still calls
 			// breaks the build until the caller goes too. Offer the caller
 			// first; this one becomes a root when it has gone.
@@ -690,6 +690,47 @@ func namedInTests(dir, name string) bool {
 		})
 		if found {
 			return true
+		}
+	}
+	return false
+}
+
+// calledByDeadElsewhere reports whether a dead function in another package
+// still calls decl. cc-connect's blackbox test helper, itself unreachable,
+// called platform.New, and deleting New first broke the build.
+func (c *Cache) calledByDeadElsewhere(tp *typedPackage, decl *ast.FuncDecl, dir string, dead map[string]map[string]bool) bool {
+	obj := tp.info.Defs[decl.Name]
+	if obj == nil || obj.Pkg() == nil || !ast.IsExported(decl.Name.Name) {
+		return false // an unexported function is not called from elsewhere
+	}
+	path := obj.Pkg().Path()
+	for other, names := range dead {
+		if other == dir {
+			continue
+		}
+		otp, err := c.load(other)
+		if err != nil {
+			continue
+		}
+		for _, f := range otp.files {
+			for _, d := range f.Decls {
+				fn, ok := d.(*ast.FuncDecl)
+				if !ok || !names[cost.FuncName(fn)] && !names[fn.Name.Name] {
+					continue
+				}
+				found := false
+				ast.Inspect(fn, func(n ast.Node) bool {
+					if id, ok := n.(*ast.Ident); ok {
+						if u := otp.info.Uses[id]; u != nil && u.Pkg() != nil && u.Pkg().Path() == path && u.Name() == decl.Name.Name {
+							found = true
+						}
+					}
+					return !found
+				})
+				if found {
+					return true
+				}
+			}
 		}
 	}
 	return false

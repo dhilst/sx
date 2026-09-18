@@ -29,6 +29,7 @@ import (
 // from the last time, and what each detector found in it is kept with it.
 type Cache struct {
 	exports map[string]string // import path -> export data file, for this pass
+	paths   map[string]string // package directory -> import path
 	pkgs    map[string]*cachedPackage
 	dead    []deadReport // deadcode's last answer
 	deadOK  bool
@@ -50,17 +51,24 @@ func NewCache() *Cache {
 // every package the tree depends on; a package that changed has a new export
 // file, which is what marks its importers stale.
 func (c *Cache) Begin(dir string) error {
-	cmd := exec.Command("go", "list", "-e", "-deps", "-export", "-f", "{{if .Export}}{{.ImportPath}}={{.Export}}{{end}}", "./...")
+	cmd := exec.Command("go", "list", "-e", "-deps", "-export", "-f", "{{.ImportPath}}={{.Export}}={{.Dir}}", "./...")
 	cmd.Dir = dir
 	var out bytes.Buffer
 	cmd.Stdout = &out
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("go list: %w", err)
 	}
-	c.exports = map[string]string{}
+	c.exports, c.paths = map[string]string{}, map[string]string{}
 	for _, line := range strings.Split(out.String(), "\n") {
-		if path, file, ok := strings.Cut(line, "="); ok {
-			c.exports[path] = file
+		parts := strings.SplitN(line, "=", 3)
+		if len(parts) != 3 {
+			continue
+		}
+		if parts[1] != "" {
+			c.exports[parts[0]] = parts[1]
+		}
+		if parts[2] != "" {
+			c.paths[parts[2]] = parts[0]
 		}
 	}
 	return nil
@@ -180,7 +188,7 @@ func (c *Cache) load(dir string) (*typedPackage, error) {
 		return nil, err
 	}
 	if e.tp.info == nil && e.err == nil {
-		e.err = e.tp.check(c.exports)
+		e.err = e.tp.check(c.exports, c.paths[dir])
 	}
 	if e.err != nil {
 		return nil, e.err
