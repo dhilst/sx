@@ -38,12 +38,19 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 				rel = c.File
 			}
 			spec := fmt.Sprintf("%s:%d:%d", rel, c.Line, c.Col)
-			cmd := exec.Command(goplsPath, "codeaction", "-kind=refactor.inline.call", "-exec", "-w", spec)
-			cmd.Dir = dir
-			var stderr bytes.Buffer
-			cmd.Stderr = &stderr
-			if err := cmd.Run(); err != nil {
-				return nil, fmt.Errorf("gopls declined to inline at %s: %s", spec, firstLine(stderr.String()))
+			if session != nil {
+				if err := session.CodeAction(c.File, "refactor.inline.call", c.Line, c.Col, c.Line, c.Col); err != nil {
+					os.WriteFile(c.File, original, 0o644)
+					return nil, fmt.Errorf("gopls declined to inline at %s: %s", spec, firstLine(err.Error()))
+				}
+			} else {
+				cmd := exec.Command(goplsPath, "codeaction", "-kind=refactor.inline.call", "-exec", "-w", spec)
+				cmd.Dir = dir
+				var stderr bytes.Buffer
+				cmd.Stderr = &stderr
+				if err := cmd.Run(); err != nil {
+					return nil, fmt.Errorf("gopls declined to inline at %s: %s", spec, firstLine(stderr.String()))
+				}
 			}
 			undo := func() error { return os.WriteFile(c.File, original, 0o644) }
 			if err := parses(c.File); err != nil {
@@ -212,13 +219,20 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 			rel = first.File
 		}
 		spec := fmt.Sprintf("%s:%d:%d-%d:%d", rel, first.StartLine, first.StartCol, first.EndLine, first.EndCol)
-		cmd := exec.Command(goplsPath, "codeaction", "-kind=refactor.extract.function", "-exec", "-w", spec)
-		cmd.Dir = dir
-		var stderr bytes.Buffer
-		cmd.Stderr = &stderr
-		if err := cmd.Run(); err != nil {
-			restore()
-			return nil, fmt.Errorf("gopls declined to extract %s: %s", spec, firstLine(stderr.String()))
+		if session != nil {
+			if err := session.CodeAction(first.File, "refactor.extract.function", first.StartLine, first.StartCol, first.EndLine, first.EndCol); err != nil {
+				restore()
+				return nil, fmt.Errorf("gopls declined to extract %s: %s", spec, firstLine(err.Error()))
+			}
+		} else {
+			cmd := exec.Command(goplsPath, "codeaction", "-kind=refactor.extract.function", "-exec", "-w", spec)
+			cmd.Dir = dir
+			var stderr bytes.Buffer
+			cmd.Stderr = &stderr
+			if err := cmd.Run(); err != nil {
+				restore()
+				return nil, fmt.Errorf("gopls declined to extract %s: %s", spec, firstLine(stderr.String()))
+			}
 		}
 		// gopls's own output is checked before anything is built on top of it.
 		// An extraction in math/big left rat.go unparseable, and the first

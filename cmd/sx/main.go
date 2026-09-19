@@ -47,6 +47,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		check := fs.Bool("check", false, "exit non-zero at the first shrinking candidate; never writes to the tree")
 		rounds := fs.Int("n", 10, "how many changes to attempt")
 		runTests := fs.Bool("test", true, "run the tests after each change and revert if they fail")
+		useLSP := fs.Bool("lsp", true, "keep one gopls session over stdio for the run instead of launching gopls for each change")
 		batch := fs.Bool("batch", false, "commit each change and test once at the end, bisecting any failure to the change that caused it; needs -apply and a clean git tree")
 		cpuprofile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
 		fs.Var(&egPaths, "eg", "file or directory of eg templates; repeat or separate with commas/path-list separators (empty disables eg)")
@@ -115,6 +116,16 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if n := len(scope.Packages()); scope.Targets() > 0 {
 			fmt.Fprintf(stdout, "  (testing %d packages: the %d under %s and the %d that import them)\n",
 				n, scope.Targets(), dir, n-scope.Targets())
+		}
+
+		if *apply && hasGopls && *useLSP {
+			l, err := refactor.StartLSP(goplsPath, refactor.ModuleRoot(dir))
+			if err != nil {
+				fmt.Fprintf(stdout, "  (gopls session did not start, using the command line: %v)\n", err)
+			} else {
+				refactor.UseLSP(l)
+				defer func() { refactor.UseLSP(nil); l.Close() }()
+			}
 		}
 
 		var hist *refactor.History

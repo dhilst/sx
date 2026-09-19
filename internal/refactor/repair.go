@@ -175,6 +175,10 @@ func Format(dir string, before Snapshot) error {
 // whether an import is still needed is a question about identifiers and their
 // types, not about text.
 func tidyImports(path string) {
+	if session != nil {
+		session.CodeAction(path, "source.organizeImports", 1, 1, 1, 1)
+		return
+	}
 	goplsPath, ok := Tool("gopls")
 	if !ok {
 		return
