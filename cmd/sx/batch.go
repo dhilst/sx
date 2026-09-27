@@ -30,51 +30,63 @@ func verifyBatch(stdout io.Writer, hist *refactor.History, scope refactor.Scope,
 		return f, f.Since(baseline)
 	}
 	for {
-		commits := hist.Commits()
-		if len(commits) == 0 {
-			return "", nil, nil
+		bad1, why1, err1, shouldReturn := newFunction13(hist, failing, stdout, baseline)
+		if shouldReturn {
+			return bad1, why1, err1
 		}
-		fails, why := failing(false)
-		if why == nil {
-			fmt.Fprintf(stdout, "  tests pass with all %d changes\n", len(commits))
-			return "", nil, nil
-		}
-		fmt.Fprintf(stdout, "  tests fail with the changes (%v); bisecting %d commits\n", why, len(commits))
-		// Every bisection step runs fresh. Through Go's test cache an
-		// unchanged package answers with the result recorded at the start:
-		// on milvus a test that had begun failing on its own looked like a
-		// pass on the "good" side, and an innocent change was dropped.
-		bad, err := hist.Bisect(commits, func() bool {
-			_, why := failing(true)
-			return why != nil
-		})
-		if err != nil {
-			return "", nil, err
-		}
-		// Bisection believes the result it gets. A flaky test sends it to
-		// a commit at random, so the verdict is checked again, fresh, before
-		// a change is thrown away.
-		if err := hist.Checkout(bad); err != nil {
-			return "", nil, err
-		}
-		_, confirmed := failing(true)
-		if err := hist.Return(commits[len(commits)-1]); err != nil {
-			return "", nil, err
-		}
-		if confirmed != nil {
-			return bad, why, nil
-		}
-		var names []string
-		for k := range fails {
-			if !baseline[k] {
-				baseline[k] = true
-				pkg, test, _ := strings.Cut(k, "\x00")
-				names = append(names, strings.TrimSpace(pkg+" "+test))
-			}
-		}
-		sort.Strings(names)
-		fmt.Fprintf(stdout, "      (%s did not fail again at %s: flaky, skipped from now on)\n", strings.Join(names, ", "), short(bad))
 	}
+}
+
+func newFunction13(hist *refactor.History, failing func(recheck bool) (refactor.Failures, error), stdout io.Writer, baseline refactor.Failures) (string, error, error, bool) {
+	commits := hist.Commits()
+	if len(commits) == 0 {
+		return "", nil, nil, true
+	}
+	fails, why := failing(false)
+	if why == nil {
+		fmt.Fprintf(stdout, "  tests pass with all %d changes\n", len(commits))
+		return "", nil, nil, true
+	}
+	fmt.Fprintf(stdout, "  tests fail with the changes (%v); bisecting %d commits\n", why, len(commits))
+	// Every bisection step runs fresh. Through Go's test cache an
+	// unchanged package answers with the result recorded at the start:
+	// on milvus a test that had begun failing on its own looked like a
+	// pass on the "good" side, and an innocent change was dropped.
+	bad, err := hist.Bisect(commits, func() bool {
+		_, why := failing(true)
+		return why != nil
+	})
+	if err != nil {
+		return "", nil, err, true
+	}
+	// Bisection believes the result it gets. A flaky test sends it to
+	// a commit at random, so the verdict is checked again, fresh, before
+	// a change is thrown away.
+	if err := hist.Checkout(bad); err != nil {
+		return "", nil, err, true
+	}
+	_, confirmed := failing(true)
+	if err := hist.Return(commits[len(commits)-1]); err != nil {
+		return "", nil, err, true
+	}
+	return newFunction24(confirmed, bad, why, fails, baseline, stdout)
+}
+
+func newFunction24(confirmed error, bad string, why error, fails refactor.Failures, baseline refactor.Failures, stdout io.Writer) (string, error, error, bool) {
+	if confirmed != nil {
+		return bad, why, nil, true
+	}
+	var names []string
+	for k := range fails {
+		if !baseline[k] {
+			baseline[k] = true
+			pkg, test, _ := strings.Cut(k, "\x00")
+			names = append(names, strings.TrimSpace(pkg+" "+test))
+		}
+	}
+	sort.Strings(names)
+	fmt.Fprintf(stdout, "      (%s did not fail again at %s: flaky, skipped from now on)\n", strings.Join(names, ", "), short(bad))
+	return "", nil, nil, false
 }
 
 // finishBatch squashes a verified run into one commit that says what it did,
@@ -104,6 +116,10 @@ func finishBatch(stdout io.Writer, dir string, hist *refactor.History, attempts,
 		}
 	}
 	m.LOCAdded, m.LOCRemoved = hist.LOC()
+	return newFunction26(kept, m, hist, stdout)
+}
+
+func newFunction26(kept []string, m refactor.RunMetrics, hist *refactor.History, stdout io.Writer) (int, error) {
 	summary := fmt.Sprintf("sx: %d changes, %d -> %d nodes (%+d), J %.1f -> %.1f, %+d lines\n\n", len(kept), m.NodesBefore, m.NodesAfter,
 		m.NodesAfter-m.NodesBefore, m.ObjectiveBefore, m.ObjectiveAfter, m.LOCAdded-m.LOCRemoved)
 	for _, k := range []refactor.Kind{refactor.KindDuplicate, refactor.KindExtract, refactor.KindHeuristic, refactor.KindDead, refactor.KindInline, refactor.KindEg} {
