@@ -40,6 +40,8 @@ const (
 	KindDuplicate Kind = "dedup"
 	// KindEg applies one example-based expression rewrite.
 	KindEg Kind = "eg"
+	// KindExtract moves part of a heavy function into a function of its own.
+	KindExtract Kind = "extract"
 )
 
 // Candidate is one change worth attempting, with what the measure says it
@@ -51,7 +53,10 @@ type Candidate struct {
 	Col       int    `json:"col"`
 	Target    string `json:"target"`
 	Predicted int    `json:"predicted"`
-	Detail    string `json:"detail"`
+	// Gain is the predicted fall in the objective J; Predicted is the fall
+	// in nodes alone. A candidate is worth trying when Gain is positive.
+	Gain   float64 `json:"gain"`
+	Detail string  `json:"detail"`
 
 	// Occurrences is set for a duplicate: every place the repeated code
 	// appears, the first of which becomes the function.
@@ -73,7 +78,7 @@ type Candidate struct {
 // candidate come back with a new name. One was retried seven times that way.
 func (c Candidate) Key() string {
 	switch c.Kind {
-	case KindDuplicate:
+	case KindDuplicate, KindExtract:
 		// Content, because the copies move whenever anything above them does.
 		return string(c.Kind) + ":" + c.Hash
 	case KindInline:
@@ -186,11 +191,11 @@ func (c *Cache) Dead(deadcodePath, dir string) ([]Candidate, error) {
 		}
 		cands = append(cands, Candidate{
 			Kind: KindDead, File: file, Line: tp.fset.Position(decl.Pos()).Line, Target: name,
-			Predicted: -model.Delta(), model: model,
+			Predicted: -model.Delta(), Gain: gain(model.Delta(), []int{cost.Weight(decl)}, nil), model: model,
 			Detail: fmt.Sprintf("%s is unreachable: %s", name, model),
 		})
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Predicted > cands[j].Predicted })
+	sortByGain(cands)
 	return cands, nil
 }
 
@@ -257,11 +262,11 @@ func (c *Cache) Inline(dir string) ([]Candidate, error) {
 	}
 	var cands []Candidate
 	for _, c := range all {
-		if c.Predicted > 0 {
+		if c.Gain > 0 {
 			cands = append(cands, c)
 		}
 	}
-	sort.SliceStable(cands, func(i, j int) bool { return cands[i].Predicted > cands[j].Predicted })
+	sortByGain(cands)
 	return cands, nil
 }
 
@@ -489,7 +494,7 @@ func (c *Cache) inlinesIn(paths []string) ([]Candidate, error) {
 		}
 		cands = append(cands, Candidate{
 			Kind: KindInline, File: sites[0].Filename, Line: sites[0].Line, Col: sites[0].Column,
-			Target: name, Predicted: -model.Delta(), model: model,
+			Target: name, Predicted: -model.Delta(), Gain: gain(model.Delta(), model.Before, model.After), model: model,
 			Detail: fmt.Sprintf("%s is called once: %s", name, model),
 		})
 	}

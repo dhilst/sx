@@ -14,6 +14,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/dhilst/sx/internal/cost"
 	_ "modernc.org/sqlite"
 )
 
@@ -68,6 +69,7 @@ CREATE INDEX IF NOT EXISTS changes_by_run ON changes (run);
 // RunMetrics is a run's totals.
 type RunMetrics struct {
 	NodesBefore, NodesAfter, LOCAdded, LOCRemoved int
+	ObjectiveBefore, ObjectiveAfter               float64
 	Attempts, Kept, Dropped                       int
 	ByKind                                        map[Kind]int
 	Detect, Apply, Test                           time.Duration
@@ -135,6 +137,14 @@ func openStore(dir string) (*sql.DB, error) {
 		db.Close()
 		return nil, err
 	}
+	// Columns added since the first schema. A database that has them
+	// refuses the ALTER, which is the answer wanted.
+	for _, col := range []string{
+		"runs ADD COLUMN objective_before REAL", "runs ADD COLUMN objective_after REAL", "runs ADD COLUMN extract INTEGER",
+		"changes ADD COLUMN gain REAL", "changes ADD COLUMN objective_before REAL", "changes ADD COLUMN objective_after REAL",
+	} {
+		db.Exec("ALTER TABLE " + col)
+	}
 	return db, nil
 }
 
@@ -143,10 +153,12 @@ func (h *History) Close(m RunMetrics) error {
 	end, _ := h.Head()
 	_, err := h.db.Exec(`UPDATE runs SET end_commit=?, finished_at=?, nodes_before=?, nodes_after=?,
 		loc_added=?, loc_removed=?, attempts=?, kept=?, dropped=?, dead=?, inline=?, dedup=?, eg=?,
-		detect_seconds=?, apply_seconds=?, test_seconds=?, test_runs=? WHERE run=?`,
+		detect_seconds=?, apply_seconds=?, test_seconds=?, test_runs=?,
+		objective_before=?, objective_after=?, extract=? WHERE run=?`,
 		end, time.Now().Format(time.RFC3339), m.NodesBefore, m.NodesAfter, m.LOCAdded, m.LOCRemoved,
 		m.Attempts, m.Kept, m.Dropped, m.ByKind[KindDead], m.ByKind[KindInline], m.ByKind[KindDuplicate], m.ByKind[KindEg],
-		m.Detect.Seconds(), m.Apply.Seconds(), m.Test.Seconds(), m.TestRuns, h.Run)
+		m.Detect.Seconds(), m.Apply.Seconds(), m.Test.Seconds(), m.TestRuns,
+		m.ObjectiveBefore, m.ObjectiveAfter, m.ByKind[KindExtract], h.Run)
 	h.db.Close()
 	return err
 }
@@ -201,18 +213,20 @@ func (h *History) testFile(pkg, test string) string {
 
 // Commit records a kept change as a commit of everything under the run's
 // directory, and its sizes.
-func (h *History) Commit(c Candidate, before, after int) error {
+func (h *History) Commit(c Candidate, before, after cost.Tree) error {
 	if _, err := git(h.dir, "add", "-A", "."); err != nil {
 		return err
 	}
-	msg := fmt.Sprintf("sx: %s %s (%d -> %d nodes)\n\nsx-key: %s", c.Kind, c.Target, before, after, c.Key())
+	msg := fmt.Sprintf("sx: %s %s (%d -> %d nodes, J %.1f -> %.1f)\n\nsx-key: %s", c.Kind, c.Target, before.Nodes, after.Nodes, before.Objective, after.Objective, c.Key())
 	if _, err := git(h.dir, commitArgs(h.dir, "-m", msg)...); err != nil {
 		return err
 	}
 	commit, _ := h.Head()
 	added, removed := h.loc(commit+"^", commit)
-	_, err := h.db.Exec(`INSERT INTO changes (run, commit_hash, kind, target, predicted, nodes_before, nodes_after, loc_added, loc_removed)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`, h.Run, commit, string(c.Kind), c.Target, c.Predicted, before, after, added, removed)
+	_, err := h.db.Exec(`INSERT INTO changes (run, commit_hash, kind, target, predicted, nodes_before, nodes_after, loc_added, loc_removed,
+		gain, objective_before, objective_after)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`, h.Run, commit, string(c.Kind), c.Target, c.Predicted, before.Nodes, after.Nodes, added, removed,
+		c.Gain, before.Objective, after.Objective)
 	return err
 }
 
@@ -349,6 +363,7 @@ func FlakyTests(dir string) Failures {
 type RunRow struct {
 	Run                                           string
 	NodesBefore, NodesAfter, LOCAdded, LOCRemoved int
+	ObjectiveBefore, ObjectiveAfter               float64
 	Attempts, Kept, Dropped                       int
 	Dedup, Dead, Inline, Eg                       int
 	Duration                                      time.Duration

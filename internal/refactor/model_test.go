@@ -2,6 +2,7 @@ package refactor
 
 import (
 	"bytes"
+	"math"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -55,19 +56,26 @@ func exampleModule(t *testing.T, name string) string {
 
 func treeNodes(t *testing.T, dir string) int {
 	t.Helper()
+	return treeScore(t, dir).Nodes
+}
+
+func treeScore(t *testing.T, dir string) cost.Tree {
+	t.Helper()
 	files, err := goFilesIn(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	total := 0
+	var weights []int
 	for _, f := range files {
 		scored, err := cost.ScoreFile(f)
 		if err != nil {
 			t.Fatal(err)
 		}
 		total += scored.Nodes
+		weights = append(weights, scored.Weights()...)
 	}
-	return total
+	return cost.Tree{Nodes: total, Objective: cost.Objective(total, weights)}
 }
 
 func requireTools(t *testing.T, names ...string) map[string]string {
@@ -87,25 +95,33 @@ func requireTools(t *testing.T, names ...string) map[string]string {
 // |AST| and whether the result builds.
 func measure(t *testing.T, name string, find func(dir string) (Candidate, bool), tools map[string]string) (delta int, builds bool, after string, err error) {
 	t.Helper()
+	d, _, builds, after, err := measureObjective(t, name, find, tools)
+	return d, builds, after, err
+}
+
+// measureObjective is measure with the change in J too.
+func measureObjective(t *testing.T, name string, find func(dir string) (Candidate, bool), tools map[string]string) (delta int, dj float64, builds bool, after string, err error) {
+	t.Helper()
 	dir := exampleModule(t, name)
 	c, ok := find(dir)
 	if !ok {
 		t.Fatalf("the candidate is not found again in a fresh copy")
 	}
-	before := treeNodes(t, dir)
+	before := treeScore(t, dir)
 	snapshot, err := Stamp(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if _, err := Apply(dir, c, tools["gopls"], tools["eg"]); err != nil {
-		return 0, false, "", err
+		return 0, 0, false, "", err
 	}
 	if err := Format(dir, snapshot); err != nil {
 		t.Fatal(err)
 	}
 	builds, _ = Repair(dir)
 	src, _ := os.ReadFile(filepath.Join(dir, "main.go"))
-	return treeNodes(t, dir) - before, builds, string(src), nil
+	now := treeScore(t, dir)
+	return now.Nodes - before.Nodes, now.Objective - before.Objective, builds, string(src), nil
 }
 
 // kinds is how each transformation's candidates are found in an example,
@@ -126,6 +142,10 @@ func kinds(t *testing.T) map[string]func(dir string) ([]Candidate, error) {
 		"dedup_": func(dir string) ([]Candidate, error) {
 			need("gopls")
 			return duplicates(dir)
+		},
+		"extract_": func(dir string) ([]Candidate, error) {
+			need("gopls")
+			return NewCache().Extractions(dir)
 		},
 		"inline_": func(dir string) ([]Candidate, error) {
 			need("gopls")
@@ -174,7 +194,7 @@ func TestModelsMatchReality(t *testing.T) {
 				}
 				for _, c := range all {
 					t.Run(c.Target, func(t *testing.T) {
-						got, builds, after, err := measure(t, name, func(dir string) (Candidate, bool) {
+						got, dj, builds, after, err := measureObjective(t, name, func(dir string) (Candidate, bool) {
 							again, err := find(dir)
 							if err != nil {
 								t.Fatal(err)
@@ -191,6 +211,9 @@ func TestModelsMatchReality(t *testing.T) {
 						}
 						if got != c.model.Delta() {
 							t.Errorf("predicted ΔN=%+d, measured %+d\n  model: %s\n%s", c.model.Delta(), got, c.model, after)
+						}
+						if math.Abs(dj+c.Gain) > 1e-9 {
+							t.Errorf("predicted ΔJ=%+.3f, measured %+.3f\n  model: %s\n%s", -c.Gain, dj, c.model, after)
 						}
 						if !builds {
 							t.Errorf("the model priced a change that does not build (%s):\n%s", c.model, after)

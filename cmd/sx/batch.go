@@ -86,23 +86,25 @@ func finishBatch(stdout io.Writer, dir string, hist *refactor.History, attempts,
 		Attempts: attempts, Kept: len(kept), Dropped: dropped, ByKind: map[refactor.Kind]int{},
 		Apply: spent["apply+gate"], Test: testTime, TestRuns: testRuns,
 	}
-	for _, d := range []string{"load", "dead", "inline", "dedup", "eg"} {
+	for _, d := range []string{"load", "dead", "inline", "dedup", "extract", "eg"} {
 		m.Detect += spent[d]
 	}
 	for _, c := range kept {
 		m.ByKind[hist.KindOf(c)]++
 	}
-	m.NodesAfter, _ = scoreTree(dir)
+	after, _ := scoreTree(dir)
+	m.NodesAfter, m.ObjectiveAfter = after.Nodes, after.Objective
 	if err := hist.Checkout(hist.Start); err == nil {
-		m.NodesBefore, _ = scoreTree(dir)
+		before, _ := scoreTree(dir)
+		m.NodesBefore, m.ObjectiveBefore = before.Nodes, before.Objective
 		if len(kept) > 0 {
 			hist.Checkout(kept[len(kept)-1])
 		}
 	}
 	m.LOCAdded, m.LOCRemoved = hist.LOC()
-	summary := fmt.Sprintf("sx: %d changes, %d -> %d nodes (%+d), %+d lines\n\n", len(kept), m.NodesBefore, m.NodesAfter,
-		m.NodesAfter-m.NodesBefore, m.LOCAdded-m.LOCRemoved)
-	for _, k := range []refactor.Kind{refactor.KindDuplicate, refactor.KindDead, refactor.KindInline, refactor.KindEg} {
+	summary := fmt.Sprintf("sx: %d changes, %d -> %d nodes (%+d), J %.1f -> %.1f, %+d lines\n\n", len(kept), m.NodesBefore, m.NodesAfter,
+		m.NodesAfter-m.NodesBefore, m.ObjectiveBefore, m.ObjectiveAfter, m.LOCAdded-m.LOCRemoved)
+	for _, k := range []refactor.Kind{refactor.KindDuplicate, refactor.KindExtract, refactor.KindDead, refactor.KindInline, refactor.KindEg} {
 		if n := m.ByKind[k]; n > 0 {
 			summary += fmt.Sprintf("  %-7s %d\n", k, n)
 		}

@@ -66,11 +66,11 @@ func (c *Cache) Eg(dir string, templates []string) ([]Candidate, error) {
 	}
 	var out []Candidate
 	for _, cand := range all {
-		if cand.Predicted > 0 {
+		if cand.Gain > 0 {
 			out = append(out, cand)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
+	sortByGain(out)
 	return out, nil
 }
 
@@ -84,7 +84,7 @@ func (c *Cache) egRewrites(dir string, templates []string) ([]Candidate, error) 
 		}
 		name := strings.TrimSuffix(filepath.Base(tmpl), filepath.Ext(tmpl))
 		out = append(out, Candidate{
-			Kind: KindEg, File: firstFile, Target: name, Predicted: -model.Delta(),
+			Kind: KindEg, File: firstFile, Target: name, Predicted: -model.Delta(), Gain: float64(-model.Delta()),
 			Template: tmpl, model: model,
 			Detail: fmt.Sprintf("%s: %s", filepath.Base(tmpl), model),
 		})

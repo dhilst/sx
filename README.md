@@ -275,10 +275,34 @@ go tool sx refactor -check -n 30 .
 to express a program. This is deliberately naive. It ignores formatting,
 comments, and taste so the tool has a simple objective function to optimize.
 
+Size alone rewards inlining everything into long functions. So each function
+also pays for its weight `W`: the sum over its statements of how deeply each is
+nested. For a block with no nested blocks, that is statements × depth. The
+objective is
+
+```text
+J = S + H·Σ_f (W_f / mB)²
+```
+
+where:
+
+- `S` is `|AST|`.
+- `B` (`-block`, default 20) is the weight a function should have.
+- `m` (`-m`, default 1) is a multiplier on `B`.
+- `H` (`-overhead`, default 32) is what an extraction typically costs in nodes.
+
+Spreading a total weight over `k` functions costs `k·H` in declarations and
+`H·W²/(k·(mB)²)` in reading. That is least when `W/k = mB`, so at the optimum
+the average function weighs `mB`. Splitting a function pays when `W > √2·mB`,
+and inlining `g` into `f` pays only when `W_f·W_g < (mB)²/2`. `H` is the typical
+cost rather than the least one (8 nodes, for `func f() {}` and `f()`). An
+extraction that really costs `h` settles functions near `mB·√(h/H)`.
+
 `sx` works by detecting refactoring candidates: dead code, deduplication,
-inlining, `eg` rewrites, and other AST/type-safe transformations. In apply mode,
-it applies candidates eagerly, then measures, builds, tests, and redetects after
-each kept change. The loop continues until there are no more candidates or the
+extraction from heavy functions, inlining, `eg` rewrites, and other
+AST/type-safe transformations. In apply mode, it applies candidates eagerly,
+then measures, builds, tests, and redetects after each kept change. A change is
+kept only when `J` falls. The loop continues until there are no more candidates or the
 configured `-n` attempt limit is reached.
 
 ## Who This Is For

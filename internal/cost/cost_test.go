@@ -77,9 +77,8 @@ func TestPrimitivesMoveTheMeasure(t *testing.T) {
 			wantSmaller: true,
 		},
 		{
-			// Kept as a warning: flattening nesting costs nodes. It was a
-			// primitive under the weighted model and is not one under this
-			// objective.
+			// Flattening nesting costs nodes; whether it pays is for the
+			// objective to say (see TestObjectiveRewardsFlatterCode).
 			name:        "inverting a guard",
 			before:      "package p\n\nfunc F(xs []int) int {\n\tn := 0\n\tfor _, x := range xs {\n\t\tif x > 0 {\n\t\t\ty := x * 2\n\t\t\tn += y\n\t\t}\n\t}\n\treturn n\n}\n",
 			after:       "package p\n\nfunc F(xs []int) int {\n\tn := 0\n\tfor _, x := range xs {\n\t\tif !(x > 0) {\n\t\t\tcontinue\n\t\t}\n\t\ty := x * 2\n\t\tn += y\n\t}\n\treturn n\n}\n",
@@ -114,5 +113,100 @@ func TestCommentsParsedWithTheFileAreNotCounted(t *testing.T) {
 	}
 	if a, b := Count(with), Count(without); a != b {
 		t.Fatalf("with comments %d nodes, without %d", a, b)
+	}
+}
+
+func weightOf(t *testing.T, src string) int {
+	t.Helper()
+	f := scoreSrc(t, "package p\n\n"+src+"\n")
+	if len(f.Functions) != 1 {
+		t.Fatalf("want one function, got %d", len(f.Functions))
+	}
+	return f.Functions[0].Weight
+}
+
+// A block with no nested blocks weighs its statements times its depth, and
+// a nested block adds its own.
+func TestWeight(t *testing.T) {
+	cases := []struct {
+		name string
+		src  string
+		want int
+	}{
+		{"empty", "func F() {}", 0},
+		{"flat", "func F() { a := 1; b := a; _ = b }", 3},
+		{"if", "func F(x int) { if x > 0 { x++; x++ } }", 1 + 2*2},
+		{"if else", "func F(x int) { if x > 0 { x++ } else { x-- } }", 1 + 2 + 2},
+		{"else if stays at its if's depth", "func F(x int) { if x > 0 { x++ } else if x < 0 { x-- } }", 1 + 2 + 1 + 2},
+		{"nested", "func F(xs []int) { for _, x := range xs { if x > 0 { x++ } } }", 1 + 2 + 3},
+		{"switch", "func F(x int) { switch x { case 1: x++; case 2: x--; x-- } }", 1 + 2 + 2*2},
+		{"select", "func F(c chan int) { select { case <-c: c <- 1 } }", 1 + 2},
+		{"bare block", "func F(x int) { { x++ } }", 2},
+		{"label", "func F() { L: for { break L } }", 1 + 2},
+		{"func literal", "func F() { f := func() { println(); println() }; f() }", 1 + 2*2 + 1},
+		{"empty statement", "func F() { ; }", 0},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := weightOf(t, c.src); got != c.want {
+				t.Errorf("weight %d, want %d", got, c.want)
+			}
+		})
+	}
+}
+
+// H is what one more function costs: its declaration and the call to it.
+func TestHIsTheCostOfAFunction(t *testing.T) {
+	decl, err := parser.ParseFile(token.NewFileSet(), "p.go", "package p\nfunc f() {}", 0)
+	if err != nil {
+		t.Fatal(err)
+	}
+	call, err := parser.ParseExpr("f()")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// The file itself and its package name are not part of the function; the
+	// call is an ExprStmt holding the CallExpr.
+	got := Count(decl.Decls[0]) + 1 + Count(call)
+	if got != MinOverhead {
+		t.Fatalf("a function and its call cost %d nodes, MinOverhead is %d", got, MinOverhead)
+	}
+}
+
+// At the optimum the average function weighs B: splitting a weight into k
+// equal functions, the objective is least at the k for which W/k is B.
+func TestTheOptimumAveragesB(t *testing.T) {
+	const total = 400
+	best, bestK := 0.0, 0
+	for k := 1; k <= total; k++ {
+		weights := make([]int, k)
+		for i := range weights {
+			weights[i] = total / k
+		}
+		weights[0] += total % k
+		j := Objective(int(H)*k, weights)
+		if bestK == 0 || j < best {
+			best, bestK = j, k
+		}
+	}
+	if avg := float64(total) / float64(bestK); avg < Block/1.5 || avg > Block*1.5 {
+		t.Fatalf("the optimum splits %d into %d functions of %.1f, B is %.0f", total, bestK, avg, Block)
+	}
+}
+
+// Inverting a guard costs nodes but takes statements out of a level, and in a
+// heavy enough function the objective pays for it.
+func TestObjectiveRewardsFlatterCode(t *testing.T) {
+	var body, flat string
+	for range 20 {
+		body += "\t\t\tn += x\n"
+		flat += "\t\tn += x\n"
+	}
+	nested := scoreSrc(t, "package p\n\nfunc F(xs []int) int {\n\tn := 0\n\tfor _, x := range xs {\n\t\tif x > 0 {\n"+body+"\t\t}\n\t}\n\treturn n\n}\n")
+	guarded := scoreSrc(t, "package p\n\nfunc F(xs []int) int {\n\tn := 0\n\tfor _, x := range xs {\n\t\tif !(x > 0) {\n\t\t\tcontinue\n\t\t}\n"+flat+"\t}\n\treturn n\n}\n")
+	a, b := Objective(nested.Nodes, nested.Weights()), Objective(guarded.Nodes, guarded.Weights())
+	if b >= a {
+		t.Fatalf("the guard did not pay: J %.1f -> %.1f (nodes %d -> %d, weight %d -> %d)",
+			a, b, nested.Nodes, guarded.Nodes, nested.Functions[0].Weight, guarded.Functions[0].Weight)
 	}
 }

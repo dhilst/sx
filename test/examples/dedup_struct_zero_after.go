@@ -11,17 +11,20 @@ func a(n int) (point, error) {
 	if n < 0 {
 		return point{}, fmt.Errorf("negative %d", n)
 	}
+	newFunction(n)
+	return point{n, n}, nil
+}
+
+func newFunction(n int) {
 	fmt.Println("valid", n)
 	fmt.Println("scaled", n*2)
-	return point{n, n}, nil
 }
 
 func b(n int) (point, error) {
 	if n < 0 {
 		return point{}, fmt.Errorf("negative %d", n)
 	}
-	fmt.Println("valid", n)
-	fmt.Println("scaled", n*2)
+	newFunction(n)
 	return point{n, -n}, nil
 }
 

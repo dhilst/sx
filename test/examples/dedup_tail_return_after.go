@@ -7,6 +7,10 @@ import "fmt"
 
 func a(n int) string {
 	fmt.Println("a")
+	return newFunction(n)
+}
+
+func newFunction(n int) string {
 	m := n * n
 	if m > 10 {
 		return "big"
@@ -16,11 +20,7 @@ func a(n int) string {
 
 func b(n int) string {
 	fmt.Println("b")
-	m := n * n
-	if m > 10 {
-		return "big"
-	}
-	return fmt.Sprint("small ", m)
+	return newFunction(n)
 }
 
 func main() {

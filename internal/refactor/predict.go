@@ -44,6 +44,11 @@ type Extraction struct {
 	Params     []string // free variables that become parameters
 	Results    []string // values the caller needs back
 	Control    string   // how returns inside the run reach the caller
+
+	// The statements the call site takes, all at the run's depth but Deep of
+	// them one deeper ("if err != nil { return ... }"), and those the new
+	// function adds to the run: the return appended to its body.
+	Site, Deep, Added int
 }
 
 // Delta is the change in |AST|: negative when the extraction shrinks the tree.
@@ -280,6 +285,22 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 		// compiled, passed every test, and shrank the tree.
 		return e, fmt.Errorf("the run contains %s, which belongs to the enclosing function's frame", what)
 	}
+	for _, st := range stmts {
+		var named string
+		ast.Inspect(st, func(n ast.Node) bool {
+			if ts, ok := n.(*ast.TypeSpec); ok && named == "" {
+				named = ts.Name.Name
+			}
+			return named == ""
+		})
+		if named != "" {
+			// A type declared in the run goes with it, out of the scope of
+			// everything after the run that names it: extracting
+			// Cache.inlinesIn's "type decl struct" left the rest of the
+			// function naming a type that was no longer there.
+			return e, fmt.Errorf("the run declares type %s", named)
+		}
+	}
 	if freeBranch(info, parent, stmts, start, end) {
 		// gopls threads these through a control value and a switch at the
 		// call site. That is not modelled, so it is not attempted.
@@ -452,6 +473,16 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 		}
 	}
 	e.C += ifCost
+	e.Site = 1
+	if canDefineCount != nResults {
+		e.Site += len(declTypes)
+	}
+	if ifCost > 0 {
+		e.Site, e.Deep = e.Site+2, 1
+	}
+	if hasValues && !hasNonNested {
+		e.Added = 1
+	}
 	if len(missing) > 0 {
 		return e, fmt.Errorf("gopls would name %s without importing it", missing[0])
 	}

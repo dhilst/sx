@@ -50,6 +50,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 		useLSP := fs.Bool("lsp", true, "keep one gopls session over stdio for the run instead of launching gopls for each change")
 		batch := fs.Bool("batch", false, "commit each change and test once at the end, bisecting any failure to the change that caused it; needs -apply and a clean git tree")
 		cpuprofile := fs.String("cpuprofile", "", "write a CPU profile of the run to this file")
+		fs.Float64Var(&cost.Block, "block", cost.Block, "B, the weight (statements × depth) a function should have on average")
+		fs.Float64Var(&cost.H, "overhead", cost.H, "H, what extracting a function typically costs in nodes")
+		fs.Float64Var(&cost.M, "m", cost.M, "the multiplier: aim at functions weighing m·B; any positive number")
 		fs.Var(&egPaths, "eg", "file or directory of eg templates; repeat or separate with commas/path-list separators (empty disables eg)")
 		if err := fs.Parse(args); err != nil {
 			return err
@@ -99,7 +102,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		if err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "%d nodes\n", before)
+		fmt.Fprintf(stdout, "%s (mB=%g, H=%g)\n", before, cost.Target(), cost.H)
 		if !hasDeadcode {
 			fmt.Fprintln(stdout, "  (deadcode not installed: unreachable functions will not be found)")
 		}
@@ -204,7 +207,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		defer func() {
 			var parts []string
-			for _, name := range []string{"load", "dead", "inline", "dedup", "eg", "apply+gate"} {
+			for _, name := range []string{"load", "dead", "inline", "dedup", "extract", "eg", "apply+gate"} {
 				if d, ok := spent[name]; ok {
 					parts = append(parts, fmt.Sprintf("%s %s", name, round(d)))
 				}
@@ -228,16 +231,17 @@ func run(args []string, stdout, stderr io.Writer) error {
 				if hasGopls {
 					timed("inline", func() { add(cache.Inline(dir)) })
 					timed("dedup", func() { add(cache.Duplicates(dir)) })
+					timed("extract", func() { add(cache.Extractions(dir)) })
 				}
 				if hasEg && len(egTemplates) > 0 {
 					timed("eg", func() { add(cache.Eg(dir, egTemplates)) })
 				}
 				best, found := refactor.Candidate{}, false
 				for _, c := range all {
-					if tried[c.Key()] || c.Predicted <= 0 {
+					if tried[c.Key()] || c.Gain <= 0 {
 						continue
 					}
-					if !found || c.Predicted > best.Predicted {
+					if !found || c.Gain > best.Gain {
 						best, found = c, true
 					}
 				}
@@ -251,7 +255,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 				c, ok = detect()
 			}
 			if !ok {
-				fmt.Fprintln(stdout, "\nnothing left that the measure says will shrink it")
+				fmt.Fprintln(stdout, "\nnothing left that the measure says will lower it")
 				break
 			}
 			attempted++
@@ -263,14 +267,14 @@ func run(args []string, stdout, stderr io.Writer) error {
 					}
 					return c.File
 				}()
-				fmt.Fprintf(stdout, "\nwould %s %s at %s:%d, predicted -%d nodes\n    %s\n", c.Kind, c.Target, where, c.Line, c.Predicted, c.Detail)
+				fmt.Fprintf(stdout, "\nwould %s %s at %s:%d, predicted %+d nodes, J -%.1f\n    %s\n", c.Kind, c.Target, where, c.Line, -c.Predicted, c.Gain, c.Detail)
 				// -check stops here rather than applying the candidate to see
 				// what it really saves. Proving the saving means writing to
 				// the tree, and a check that edits the code it is checking is
 				// the wrong shape for CI: the guarantee is worth more than the
 				// sharper number.
 				if *check {
-					return fmt.Errorf("minimization possible: %s %s at %s:%d, predicted -%d nodes", c.Kind, c.Target, where, c.Line, c.Predicted)
+					return fmt.Errorf("minimization possible: %s %s at %s:%d, predicted %+d nodes, J -%.1f", c.Kind, c.Target, where, c.Line, -c.Predicted, c.Gain)
 				}
 				break
 			}
@@ -377,8 +381,8 @@ func run(args []string, stdout, stderr io.Writer) error {
 						delete(tried, c.Key())
 					}
 				}
-			case after >= before:
-				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  %d -> %d nodes, no gain\n", attempted, elapsed, c.Kind, c.Target, before, after)
+			case after.Objective >= before.Objective:
+				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  %s -> %s, no gain\n", attempted, elapsed, c.Kind, c.Target, before, after)
 				if err := revert(); err != nil {
 					return err
 				}
@@ -390,7 +394,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 						return err
 					}
 				}
-				fmt.Fprintf(stdout, "  %-2d %7s  %-6s %-22s %d -> %d (-%d, predicted -%d), %s\n", attempted, elapsed, c.Kind, c.Target, before, after, before-after, c.Predicted, verdict)
+				fmt.Fprintf(stdout, "  %-2d %7s  %-7s %-22s %d -> %d nodes (%+d, predicted %+d), J %.1f -> %.1f (%+.1f, predicted %+.1f), %s\n",
+					attempted, elapsed, c.Kind, c.Target, before.Nodes, after.Nodes, after.Nodes-before.Nodes, -c.Predicted,
+					before.Objective, after.Objective, after.Objective-before.Objective, -c.Gain, verdict)
 				before = after
 				applied++
 			}
@@ -430,7 +436,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 			before, _ = scoreTree(dir)
 			applied = kept
 		}
-		fmt.Fprintf(stdout, "\n%d nodes after %d changes in %d attempts\n", before, applied, attempted)
+		fmt.Fprintf(stdout, "\n%s after %d changes in %d attempts\n", before, applied, attempted)
 		return nil
 	}
 	if len(args) > 0 && args[0] == "status" {
@@ -445,6 +451,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 	jsonOut := fs.Bool("json", false, "emit JSON")
 	limit := fs.Int("n", 20, "how many functions to list (0 for all)")
 	tests := fs.Bool("tests", false, "include _test.go files")
+	byWeight := fs.Bool("weight", false, "list the heaviest functions rather than the largest")
+	fs.Float64Var(&cost.Block, "block", cost.Block, "B, the weight (statements × depth) a function should have on average")
+	fs.Float64Var(&cost.H, "overhead", cost.H, "H, what extracting a function typically costs in nodes")
+	fs.Float64Var(&cost.M, "m", cost.M, "the multiplier: aim at functions weighing m·B; any positive number")
 	if err := fs.Parse(args); err != nil {
 		return err
 	}
@@ -469,7 +479,15 @@ func run(args []string, stdout, stderr io.Writer) error {
 			report.Functions = append(report.Functions, scored.Functions...)
 		}
 	}
+	var weights []int
+	for _, f := range report.Functions {
+		weights = append(weights, f.Weight)
+	}
+	report.Objective = cost.Objective(report.Total, weights)
 	cost.Sort(report.Functions)
+	if *byWeight {
+		sort.SliceStable(report.Functions, func(i, j int) bool { return report.Functions[i].Weight > report.Functions[j].Weight })
+	}
 	if *jsonOut {
 		enc := json.NewEncoder(stdout)
 		enc.SetIndent("", "  ")
@@ -477,14 +495,23 @@ func run(args []string, stdout, stderr io.Writer) error {
 	}
 	{
 		var limit int = *limit
-		fmt.Fprintf(stdout, "%d nodes over %d files, %d functions\n\n", report.Total, len(report.Files), len(report.Functions))
-		fmt.Fprintf(stdout, "%7s  %s\n", "NODES", "FUNCTION")
+		fmt.Fprintf(stdout, "%d nodes over %d files, %d functions\n", report.Total, len(report.Files), len(report.Functions))
+		mean := 0.0
+		if len(weights) > 0 {
+			total := 0
+			for _, w := range weights {
+				total += w
+			}
+			mean = float64(total) / float64(len(weights))
+		}
+		fmt.Fprintf(stdout, "J %.1f, mean weight %.1f (mB=%g, H=%g)\n\n", report.Objective, mean, cost.Target(), cost.H)
+		fmt.Fprintf(stdout, "%7s %7s %8s  %s\n", "NODES", "WEIGHT", "LOAD", "FUNCTION")
 		for i, f := range report.Functions {
 			if limit > 0 && i >= limit {
 				fmt.Fprintf(stdout, "... %d more\n", len(report.Functions)-i)
 				break
 			}
-			fmt.Fprintf(stdout, "%7d  %s:%d %s\n", f.Nodes, f.File, f.Line, f.Name)
+			fmt.Fprintf(stdout, "%7d %7d %8.1f  %s:%d %s\n", f.Nodes, f.Weight, cost.Load(f.Weight), f.File, f.Line, f.Name)
 		}
 	}
 	return nil

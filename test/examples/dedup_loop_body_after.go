@@ -7,6 +7,11 @@ package main
 import "fmt"
 
 func a(xs []int) int {
+	total := newFunction(xs)
+	return total
+}
+
+func newFunction(xs []int) int {
 	total := 0
 	for _, x := range xs {
 		scaled := x * 2
@@ -18,13 +23,7 @@ func a(xs []int) int {
 }
 
 func b(xs []int) int {
-	total := 0
-	for _, x := range xs {
-		scaled := x * 2
-		adjusted := scaled + 1
-		total += adjusted
-		total += scaled
-	}
+	total := newFunction(xs)
 	return total * 2
 }
 

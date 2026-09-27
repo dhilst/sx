@@ -57,14 +57,14 @@ func DuplicateCandidates(dir string) ([]Candidate, error) {
 	}
 	var out []Candidate
 	for _, c := range all {
-		if c.Predicted > 0 {
+		if c.Gain > 0 {
 			out = append(out, c)
 		}
 	}
 	// Sub-runs of a repeated run repeat too, so the same code appears at
 	// several lengths. Keeping the largest at each site avoids counting one
 	// finding three times.
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
+	sortByGain(out)
 	return maximal(out), nil
 }
 
@@ -80,11 +80,11 @@ func (c *Cache) Duplicates(dir string) ([]Candidate, error) {
 	}
 	var out []Candidate
 	for _, cand := range all {
-		if cand.Predicted > 0 {
+		if cand.Gain > 0 {
 			out = append(out, cand)
 		}
 	}
-	sort.SliceStable(out, func(i, j int) bool { return out[i].Predicted > out[j].Predicted })
+	sortByGain(out)
 	return maximal(out), nil
 }
 
@@ -216,7 +216,7 @@ func (c *Cache) duplicatesIn(dir string) ([]Candidate, error) {
 		hash := hex.EncodeToString(h[:])
 		out = append(out, Candidate{
 			Kind: KindDuplicate, File: r.occ[0].File, Line: r.occ[0].StartLine,
-			Col: r.occ[0].StartCol, Target: "dup:" + hash[:8], Predicted: -model.Delta(),
+			Col: r.occ[0].StartCol, Target: "dup:" + hash[:8], Predicted: -model.Delta(), Gain: extractionGain(model, r.occ),
 			Occurrences: r.occ, Hash: hash, model: model,
 			Detail: fmt.Sprintf("%d identical copies of %d nodes: %s", d, r.nodes, model),
 		})

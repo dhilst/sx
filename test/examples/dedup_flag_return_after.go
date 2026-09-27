@@ -9,17 +9,20 @@ func a(n int) string {
 	if n < 0 {
 		return "negative"
 	}
+	newFunction(n)
+	return "ok"
+}
+
+func newFunction(n int) {
 	fmt.Println("checked", n)
 	fmt.Println("positive", n > 0)
-	return "ok"
 }
 
 func b(n int) string {
 	if n < 0 {
 		return "negative"
 	}
-	fmt.Println("checked", n)
-	fmt.Println("positive", n > 0)
+	newFunction(n)
 	return "fine"
 }
 

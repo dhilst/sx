@@ -39,6 +39,9 @@ type Inlining struct {
 	R, S, D, I int
 	Strategy   string
 	Bound      []string // parameters kept in a var declaration
+
+	// The weights of the caller and the callee, and of the caller after.
+	Before, After []int
 }
 
 // Delta is the change in |AST|.
@@ -237,6 +240,30 @@ func predictInline(tp *typedPackage, callerFile *ast.File, call *ast.CallExpr, c
 		}
 	}
 	stmt, _ := parent.(*ast.ExprStmt)
+	// Where the call sits in the caller, for what the change does to its
+	// weight: the statement that holds it, and that statement's depth.
+	var caller *ast.FuncDecl
+	var anchor ast.Stmt
+	for _, n := range path {
+		switch n := n.(type) {
+		case *ast.FuncDecl:
+			caller = n
+		case ast.Stmt:
+			if _, ok := n.(*ast.BlockStmt); !ok {
+				anchor = n
+			}
+		}
+	}
+	depth := 1
+	if caller != nil && anchor != nil {
+		depth = max(1, cost.Depth(caller, anchor))
+	}
+	litsAt := func(e ast.Node, d int) int {
+		w := 0
+		cost.Visit(e, d, func(_ ast.Stmt, d int) { w += d })
+		return w
+	}
+	var weighs int // what the change adds to the caller's weight
 	switch {
 	case len(body) == 0 && stmt != nil:
 		m.Strategy = "empty body"
@@ -250,15 +277,19 @@ func predictInline(tp *typedPackage, callerFile *ast.File, call *ast.CallExpr, c
 		}
 		if kept > 0 {
 			m.R += 1 + kept // _, _ = args
+		} else {
+			weighs = -depth
 		}
 	case single && len(results) == 1 && stmt != nil && !needBinding && validAsStmt(results[0]):
 		m.Strategy = "call statement reduced to its returned call"
 		m.S = cost.Count(call)
 		m.R = cost.Count(results[0]) + subst
+		weighs = litsAt(results[0], depth)
 	case single && len(results) == 1 && !needBinding && stmt == nil:
 		m.Strategy = "expression reduced to the returned expression"
 		m.S = cost.Count(call)
 		m.R = cost.Count(results[0]) + subst
+		weighs = litsAt(results[0], depth)
 		if t := decl.Type.Results.List[0].Type; !trivialConversion(info.Types[results[0]].Value, info.TypeOf(results[0]), info.TypeOf(t)) {
 			m.R += 1 + cost.Count(t) // T(e): the implicit conversion made explicit
 			converted = append(converted, t)
@@ -270,9 +301,16 @@ func predictInline(tp *typedPackage, callerFile *ast.File, call *ast.CallExpr, c
 			m.R += cost.Count(s)
 		}
 		m.R += subst + binding
+		at := depth
 		if clash(info, path, stmt, decl, bindingNames) {
 			m.R++ // the braces stay
 			m.Strategy += " in braces"
+			at++
+		}
+		n, w := cost.Shape(body)
+		weighs = w + (at-1)*n - depth
+		if needBinding {
+			weighs += at
 		}
 	default:
 		return m, fmt.Errorf("gopls would wrap the body in a function literal")
@@ -295,6 +333,12 @@ func predictInline(tp *typedPackage, callerFile *ast.File, call *ast.CallExpr, c
 		}
 	}
 	m.I = importDelta(tp, []*ast.File{callerFile, calleeFile}, gone, map[*ast.File]map[string]bool{callerFile: packagesIn(info, arrived...)})
+	m.Before = []int{cost.Weight(decl)}
+	if caller != nil {
+		w := cost.Weight(caller)
+		m.Before = append(m.Before, w)
+		m.After = []int{w + weighs}
+	}
 	return m, nil
 }
 

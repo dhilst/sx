@@ -11,9 +11,13 @@ func a(xs []int) {
 		if x < 0 {
 			continue
 		}
-		fmt.Println("kept", x)
-		fmt.Println("double", x*2)
+		newFunction(x)
 	}
+}
+
+func newFunction(x int) {
+	fmt.Println("kept", x)
+	fmt.Println("double", x*2)
 }
 
 func b(xs []int) {
@@ -21,8 +25,7 @@ func b(xs []int) {
 		if x < 0 {
 			continue
 		}
-		fmt.Println("kept", x)
-		fmt.Println("double", x*2)
+		newFunction(x)
 	}
 }
 

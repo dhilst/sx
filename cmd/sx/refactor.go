@@ -6,20 +6,22 @@ import (
 	"github.com/dhilst/sx/internal/cost"
 )
 
-func scoreTree(dir string) (int, error) {
+func scoreTree(dir string) (cost.Tree, error) {
 	files, err := goFiles(dir, false)
 	if err != nil {
-		return 0, err
+		return cost.Tree{}, err
 	}
-	total := 0
+	nodes := 0
+	var weights []int
 	for _, f := range files {
 		scored, err := cost.ScoreFile(f)
 		if err != nil {
-			return 0, err
+			return cost.Tree{}, err
 		}
-		total += scored.Nodes
+		nodes += scored.Nodes
+		weights = append(weights, scored.Weights()...)
 	}
-	return total, nil
+	return cost.Tree{Nodes: nodes, Objective: cost.Objective(nodes, weights)}, nil
 }
 
 func round(d time.Duration) string { return d.Round(time.Millisecond).String() }
