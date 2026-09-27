@@ -314,3 +314,87 @@ func TestExtractionRefusesReturningAnOuterLocal(t *testing.T) {
 		t.Fatal("no run contains the return")
 	}
 }
+
+// Runs the extraction model has to refuse, each named by a line every
+// refused run contains and one it must not contain.
+func TestExtractionRefusesUnsafeRuns(t *testing.T) {
+	for name, c := range map[string]struct {
+		src, has, lacks string
+		top             bool // the run starts with has, at the top of the new function
+	}{
+		// i is written in the run and read again only after the goto jumps
+		// back, since nothing after it in the source reads it: a helper that
+		// does not hand it back loses the write.
+		"backward goto": {`package main
+
+import "fmt"
+
+func main() {
+	total, i := 0, 0
+again:
+	if i < 3 {
+		total += i * 2
+		i++
+		goto again
+	}
+	fmt.Println(total)
+}
+`, "i++", "goto", false},
+		// The run declares args at its top, and args is also free in it:
+		// moved out, the parameter and the declaration share one scope. A
+		// run holding the whole if keeps the declaration in the if's block,
+		// which is fine.
+		"redeclared parameter": {`package main
+
+import "fmt"
+
+func run(args []string) int {
+	if len(args) > 0 {
+		var args []string = args[1:]
+		n := len(args)
+		fmt.Println(n, args)
+		return n
+	}
+	return 0
+}
+
+func main() { fmt.Println(run([]string{"a", "b"})) }
+`, "var args", "", true},
+	} {
+		t.Run(name, func(t *testing.T) {
+			dir := write(t, "main.go", c.src)
+			cache := NewCache()
+			cache.Begin(dir)
+			tp, err := cache.load(dir)
+			if err != nil {
+				t.Fatal(err)
+			}
+			checked := 0
+			for _, f := range tp.files {
+				for _, d := range f.Decls {
+					fn, ok := d.(*ast.FuncDecl)
+					if !ok || fn.Body == nil {
+						continue
+					}
+					lists(fn.Body, func(list []ast.Stmt) {
+						for i := range list {
+							for j := i + 1; j <= len(list); j++ {
+								run := c.src[tp.fset.Position(list[i].Pos()).Offset:tp.fset.Position(list[j-1].End()).Offset]
+								if !strings.Contains(run, c.has) || c.lacks != "" && strings.Contains(run, c.lacks) || c.top && !strings.HasPrefix(run, c.has) {
+									continue
+								}
+								checked++
+								if m, err := predictExtractionTail(tp, f, list[i:j], 1, []*ast.File{f}, true); err == nil {
+									t.Errorf("priced %s\n%s", m, run)
+								}
+							}
+						}
+					})
+				}
+			}
+			if checked == 0 {
+				t.Fatal("no run matched")
+			}
+		})
+	}
+}

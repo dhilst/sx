@@ -392,6 +392,17 @@ func predictExtractionTail(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d
 		}
 	}
 
+	declared := topDeclares(stmts)
+	for _, name := range e.Params {
+		if declared[name] {
+			// The parameter and the declaration would share the new
+			// function's top scope. run()'s refactor subcommand began
+			// "var args []string = args[1:]", and moved out whole it did
+			// not build: args redeclared in this block.
+			return e, fmt.Errorf("the run declares %s, which would also be a parameter", name)
+		}
+	}
+
 	// The enclosing function's results, when a return has to be carried out.
 	type retVar struct{ decl, zero int }
 	var retVars []retVar
@@ -988,6 +999,29 @@ func readLater(info *types.Info, outer *ast.FuncDecl, parent map[ast.Node]ast.No
 		case *ast.ForStmt, *ast.RangeStmt:
 			return true
 		}
+	}
+	// A goto back to a label before the run is a loop too. run()'s batch
+	// loop restarts with "goto batched", and a helper extracted from it
+	// wrote before and applied without handing them back: the build and
+	// every model passed it, and only the batch test noticed.
+	labels := map[string]token.Pos{}
+	ast.Inspect(outer, func(n ast.Node) bool {
+		if l, ok := n.(*ast.LabeledStmt); ok {
+			labels[l.Label.Name] = l.Pos()
+		}
+		return true
+	})
+	back := false
+	ast.Inspect(outer, func(n ast.Node) bool {
+		if b, ok := n.(*ast.BranchStmt); ok && b.Tok == token.GOTO && b.Label != nil {
+			if at, ok := labels[b.Label.Name]; ok && at < stmts[0].Pos() && b.Pos() >= stmts[0].Pos() && obj.Parent().Contains(at) {
+				back = true
+			}
+		}
+		return !back
+	})
+	if back {
+		return true
 	}
 	captured := false
 	ast.Inspect(outer, func(n ast.Node) bool {
