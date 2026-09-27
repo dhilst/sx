@@ -301,6 +301,13 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 			return e, fmt.Errorf("the run declares type %s", named)
 		}
 	}
+	if name := fieldWrite(info, stmts); name != "" {
+		// gopls passes the variable in by value and does not hand it back,
+		// so the write lands on the helper's copy. Extracting
+		// "m.S = ...; m.R = ..." out of predictInline made every inline
+		// predict a change of zero, and only the model tests noticed.
+		return e, fmt.Errorf("the run writes a field or element of %s, which the new function would get a copy of", name)
+	}
 	if freeBranch(info, parent, stmts, start, end) {
 		// gopls threads these through a control value and a switch at the
 		// call site. That is not modelled, so it is not attempted.
@@ -775,6 +782,80 @@ func references(info *types.Info, expr ast.Expr, obj types.Object) bool {
 		return !found
 	})
 	return found
+}
+
+// fieldWrite is the variable, declared outside stmts, whose field or array
+// element stmts write in place, or "" if there is none: m.S = 1, a[i]++.
+func fieldWrite(info *types.Info, stmts []ast.Stmt) string {
+	start, end := stmts[0].Pos(), stmts[len(stmts)-1].End()
+	written := ""
+	check := func(e ast.Expr) {
+		if _, ok := ast.Unparen(e).(*ast.Ident); ok {
+			return // the variable itself: the results model covers it
+		}
+		base := valueBase(info, e)
+		if base == nil {
+			return
+		}
+		if obj := info.Uses[base]; obj != nil && (obj.Pos() < start || obj.Pos() > end) && written == "" {
+			written = base.Name
+		}
+	}
+	for _, st := range stmts {
+		ast.Inspect(st, func(n ast.Node) bool {
+			switch n := n.(type) {
+			case *ast.FuncLit:
+				return false
+			case *ast.AssignStmt:
+				for _, lhs := range n.Lhs {
+					check(lhs)
+				}
+			case *ast.IncDecStmt:
+				check(n.X)
+			}
+			return true
+		})
+	}
+	return written
+}
+
+// valueBase is the variable e is part of, reached through struct fields and
+// array elements held by value, or nil when a pointer, slice or map is in the
+// way: writing through one of those reaches the caller's value either way.
+func valueBase(info *types.Info, e ast.Expr) *ast.Ident {
+	for {
+		switch x := e.(type) {
+		case *ast.ParenExpr:
+			e = x.X
+		case *ast.Ident:
+			return x
+		case *ast.SelectorExpr:
+			sel := info.Selections[x]
+			if sel == nil || sel.Kind() != types.FieldVal || sel.Indirect() {
+				return nil
+			}
+			if t := info.TypeOf(x.X); t == nil || isPointer(t) {
+				return nil
+			}
+			e = x.X
+		case *ast.IndexExpr:
+			t := info.TypeOf(x.X)
+			if t == nil {
+				return nil
+			}
+			if _, ok := t.Underlying().(*types.Array); !ok {
+				return nil
+			}
+			e = x.X
+		default:
+			return nil
+		}
+	}
+}
+
+func isPointer(t types.Type) bool {
+	_, ok := t.Underlying().(*types.Pointer)
+	return ok
 }
 
 // aliased reports whether the run lets anything keep a reference to obj: its

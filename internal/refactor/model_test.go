@@ -239,6 +239,7 @@ func TestExtractionModelRefuses(t *testing.T) {
 		"dedup_redeclared":     {"n, err := strconv.Atoi(s)", ""},
 		"dedup_returns_differ": {"return nil, err", ""},
 		"dedup_results_differ": {"body := strings.TrimSpace(s)", ""},
+		"dedup_field_write":    {"s.count = len(xs)", "stats{"},
 	} {
 		t.Run(name, func(t *testing.T) {
 			dir := exampleModule(t, name)
