@@ -2,6 +2,7 @@ package refactor
 
 import (
 	"bytes"
+	"go/ast"
 	"math"
 	"os"
 	"os/exec"
@@ -266,4 +267,46 @@ func goBuild(dir string) bool {
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
 	return cmd.Run() == nil
+}
+
+// Every run of the example that contains a nested "return total, ..." but
+// not total's declaration is refused, unless the call is simply returned:
+// the call gopls writes would declare its carried-back value over total with
+// :=, and the path that does not return would zero it.
+func TestExtractionRefusesReturningAnOuterLocal(t *testing.T) {
+	dir := exampleModule(t, "extract_return_local")
+	src := exampleSource(t, "extract_return_local_before.go")
+	c := NewCache()
+	c.Begin(dir)
+	tp, err := c.load(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	checked := 0
+	for _, f := range tp.files {
+		for _, d := range f.Decls {
+			fn, ok := d.(*ast.FuncDecl)
+			if !ok || fn.Body == nil {
+				continue
+			}
+			lists(fn.Body, func(list []ast.Stmt) {
+				for i := range list {
+					for j := i + 1; j <= len(list); j++ {
+						run := src[tp.fset.Position(list[i].Pos()).Offset:tp.fset.Position(list[j-1].End()).Offset]
+						if !strings.Contains(run, "return total, errors.New") || strings.Contains(run, "total := 0") {
+							continue
+						}
+						checked++
+						m, err := predictExtraction(tp, f, list[i:j], 1, []*ast.File{f})
+						if err == nil && !strings.HasPrefix(m.Control, "trailing") {
+							t.Errorf("priced a run returning total: %s\n%s", m, run)
+						}
+					}
+				}
+			})
+		}
+	}
+	if checked == 0 {
+		t.Fatal("no run contains the return")
+	}
 }

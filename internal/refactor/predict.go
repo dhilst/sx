@@ -406,6 +406,17 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 			}
 		}
 		names := len(retVars)
+		if !hasNonNested {
+			if name := returnedOuter(info, returns, start, end); name != "" {
+				// gopls names the values it carries back after what the
+				// returns return, and declares them with := at the call,
+				// which reuses a variable already there. The path that does
+				// not return then hands back a zero value into it: extracting
+				// part of predictExtraction wrote "..., e, err, shouldReturn
+				// := newFunction2(...)" and every model priced nothing.
+				return e, fmt.Errorf("a return inside the run returns %s, which the call would overwrite", name)
+			}
+		}
 		switch {
 		case hasNonNested:
 			e.Control = "trailing return: the call is returned"
@@ -782,6 +793,24 @@ func references(info *types.Info, expr ast.Expr, obj types.Object) bool {
 		return !found
 	})
 	return found
+}
+
+// returnedOuter is a variable declared outside the run that one of its
+// returns hands back by name, or "" if there is none.
+func returnedOuter(info *types.Info, returns []*ast.ReturnStmt, start, end token.Pos) string {
+	for _, ret := range returns {
+		for _, r := range ret.Results {
+			id, ok := ast.Unparen(r).(*ast.Ident)
+			if !ok {
+				continue
+			}
+			if v, ok := info.Uses[id].(*types.Var); ok && !v.IsField() && v.Parent() != nil && v.Parent() != types.Universe &&
+				(v.Pos() < start || v.Pos() > end) && v.Parent() != v.Pkg().Scope() {
+				return id.Name
+			}
+		}
+	}
+	return ""
 }
 
 // fieldWrite is the variable, declared outside stmts, whose field or array
