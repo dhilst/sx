@@ -58,7 +58,7 @@ func verifyBatch(stdout io.Writer, hist *refactor.History, scope refactor.Scope,
 			return "", nil, err
 		}
 		_, confirmed := failing(true)
-		if err := hist.Checkout(commits[len(commits)-1]); err != nil {
+		if err := hist.Return(commits[len(commits)-1]); err != nil {
 			return "", nil, err
 		}
 		if confirmed != nil {
@@ -98,7 +98,9 @@ func finishBatch(stdout io.Writer, dir string, hist *refactor.History, attempts,
 		before, _ := scoreTree(dir)
 		m.NodesBefore, m.ObjectiveBefore = before.Nodes, before.Objective
 		if len(kept) > 0 {
-			hist.Checkout(kept[len(kept)-1])
+			hist.Return(kept[len(kept)-1])
+		} else {
+			hist.Return(hist.Start)
 		}
 	}
 	m.LOCAdded, m.LOCRemoved = hist.LOC()

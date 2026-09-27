@@ -35,6 +35,11 @@ type History struct {
 	Run   string
 	Start string // the commit the run started from
 
+	// branch is the branch the run started on, "" for a detached HEAD.
+	// Bisection checks out older commits detached; Return puts the run
+	// back on the branch.
+	branch string
+
 	testFiles map[string]map[string]string // package -> test -> file
 }
 
@@ -113,7 +118,8 @@ func OpenHistory(dir string) (*History, error) {
 	if err != nil {
 		return nil, err
 	}
-	h := &History{dir: dir, db: db, Run: time.Now().Format("20060102-150405.000"), Start: start, testFiles: map[string]map[string]string{}}
+	branch, _ := git(dir, "symbolic-ref", "-q", "--short", "HEAD")
+	h := &History{dir: dir, db: db, Run: time.Now().Format("20060102-150405.000"), Start: start, branch: branch, testFiles: map[string]map[string]string{}}
 	_, err = db.Exec(`INSERT INTO runs (run, dir, start_commit, started_at) VALUES (?, ?, ?, ?)`,
 		h.Run, dir, start, time.Now().Format(time.RFC3339))
 	return h, err
@@ -263,6 +269,18 @@ func (h *History) Checkout(commit string) error {
 	return err
 }
 
+// Return moves the run to commit and back onto the branch it started on,
+// which then points at commit. Checkout alone left a run that had bisected
+// on a detached HEAD: the rest of the run and its squashed commit went on
+// there, and the branch stayed at the commits bisection had condemned.
+func (h *History) Return(commit string) error {
+	if h.branch == "" {
+		return h.Checkout(commit)
+	}
+	_, err := git(h.dir, "checkout", "-q", "-B", h.branch, commit)
+	return err
+}
+
 // Bisect finds the first commit at which bad holds, given that it does not
 // hold at Start and does at the last commit. It leaves the tree at the last
 // commit.
@@ -280,7 +298,7 @@ func (h *History) Bisect(commits []string, bad func() bool) (string, error) {
 			lo = mid
 		}
 	}
-	return commits[hi], h.Checkout(last)
+	return commits[hi], h.Return(last)
 }
 
 // ResetTo moves the run back to a commit, discarding the ones after it, and

@@ -74,7 +74,7 @@ func TestHelperBStays(t *testing.T) {
 		}
 		return string(out)
 	}
-	git("init", "-q")
+	git("init", "-q", "-b", "work")
 	git("add", "-A")
 	git("commit", "-qm", "init")
 	t.Setenv("GOFLAGS", "-count=1")
@@ -89,6 +89,12 @@ func TestHelperBStays(t *testing.T) {
 	}
 	if log := git("log", "--format=%s"); !strings.HasPrefix(log, "sx: 3 changes, 76 -> 45 nodes") || strings.Count(log, "\n") != 2 {
 		t.Fatalf("want one squashed commit on top of init, got:\n%s", log)
+	}
+	// Bisection checks out older commits; the run has to end back on the
+	// branch it started on, with the squashed commit on it, not on a
+	// detached HEAD that the next checkout leaves behind.
+	if ref := strings.TrimSpace(git("symbolic-ref", "-q", "--short", "HEAD")); ref != "work" {
+		t.Fatalf("the run ended on %q, not on branch work", ref)
 	}
 	if refs := git("for-each-ref", "refs/sx/runs"); refs == "" {
 		t.Fatal("the separate commits were not kept")
