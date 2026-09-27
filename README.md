@@ -281,12 +281,13 @@ nested. For a block with no nested blocks, that is statements × depth. The
 objective is
 
 ```text
-J = S + H·Σ_f (W_f / mB)²
+J = S + C
 ```
 
 where:
 
-- `S` is `|AST|`.
+- `S` is the structural cost, `|AST|`.
+- `C` is the cognitive cost, `H·Σ_f (W_f / mB)²`, summed over the functions `f`.
 - `B` (`-block`, default 20) is the weight a function should have.
 - `m` (`-m`, default 1) is a multiplier on `B`.
 - `H` (`-overhead`, default 32) is what an extraction typically costs in nodes.
