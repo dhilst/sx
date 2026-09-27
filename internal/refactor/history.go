@@ -219,11 +219,14 @@ func (h *History) testFile(pkg, test string) string {
 
 // Commit records a kept change as a commit of everything under the run's
 // directory, and its sizes.
-func (h *History) Commit(c Candidate, before, after cost.Tree) error {
+func (h *History) Commit(c Candidate, before, after cost.Tree, notes ...string) error {
 	if _, err := git(h.dir, "add", "-A", "."); err != nil {
 		return err
 	}
 	msg := fmt.Sprintf("sx: %s %s (%d -> %d nodes, J %.1f -> %.1f)\n\nsx-key: %s", c.Kind, c.Target, before.Nodes, after.Nodes, before.Objective, after.Objective, c.Key())
+	for _, n := range notes {
+		msg += "\n" + n
+	}
 	if _, err := git(h.dir, commitArgs(h.dir, "-m", msg)...); err != nil {
 		return err
 	}

@@ -1,0 +1,56 @@
+dead_func	proved
+dead_import	proved assuming the init functions of strings have no effect the program observes
+dead_last_import	proved assuming the init functions of errors, internal/reflectlite, internal/sync, internal/synctest, internal/unsafeheader, io, iter, math/bits, strings, sync, sync/atomic, unicode, unicode/utf8 have no effect the program observes
+dedup_address_taken	proved
+dedup_bare	proved (2 functions)
+dedup_case_clause	proved
+dedup_defer	proved (2 functions)
+dedup_err_return	proved
+dedup_field_write	proved
+dedup_flag_return	proved (2 functions)
+dedup_free_branch	proved (2 functions)
+dedup_funclit_return	proved
+dedup_generic	proved
+dedup_growth	proved
+dedup_loop_body	proved (2 functions)
+dedup_loop_carried	proved (2 functions)
+dedup_missing_import	proved
+dedup_mixed_define	proved
+dedup_named_results	proved (2 functions)
+dedup_operator_differs	proved (2 functions)
+dedup_params	proved
+dedup_redeclared	proved
+dedup_results_defined	proved
+dedup_results_differ	proved
+dedup_results_reassigned	proved
+dedup_results_shrink	proved (3 functions)
+dedup_returns_differ	proved (2 functions)
+dedup_selector_free	proved (2 functions)
+dedup_struct_zero	proved (2 functions)
+dedup_tail_return	proved (2 functions)
+dedup_three_copies	proved (3 functions)
+dedup_types_differ	proved
+eg_bool_compare	proved (1 functions)
+eg_errorf	proved (1 functions) assuming the init functions of cmp, fmt, internal/bisect, internal/filepathlite, internal/fmtsort, internal/godebug, internal/itoa, internal/oserror, internal/poll, internal/sync, internal/synctest, internal/syscall/execenv, internal/syscall/unix, internal/testlog, io, io/fs, iter, math, math/bits, os, path, reflect, slices, strconv, sync, sync/atomic, syscall, time, unicode, unicode/utf8 have no effect the program observes
+eg_full_slice	proved (1 functions)
+eg_itoa	proved (1 functions)
+eg_len_string	proved (1 functions)
+eg_sprintf_non_string	proved (1 functions)
+eg_strings_contains	proved (1 functions)
+extract_errors	proved (1 functions)
+extract_flat	proved (1 functions)
+extract_light	proved
+extract_nested	proved (1 functions)
+extract_return_local	proved (1 functions)
+heuristic_heavy_block_defer	proved (1 functions)
+heuristic_heavy_block_loop	proved (1 functions)
+inline_bind_clash	proved (1 functions)
+inline_effect_arg	proved (1 functions)
+inline_expr_substitute	proved (1 functions)
+inline_expression_statement_body	proved
+inline_heavy_caller	proved
+inline_named_result	proved (1 functions)
+inline_once	proved (1 functions)
+inline_parens	proved (1 functions)
+inline_typed_const	proved (1 functions)
+inline_unused_param	proved (1 functions)

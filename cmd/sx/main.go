@@ -133,7 +133,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		tried, unstable, applied, attempted, cache, spent, timed := newFunction9()
 		defer func() {
 			var parts []string
-			for _, name := range []string{"load", "dead", "inline", "dedup", "extract", "heuristic", "eg", "apply+gate"} {
+			for _, name := range []string{"load", "dead", "inline", "dedup", "extract", "heuristic", "eg", "apply+gate", "prove"} {
 				if d, ok := spent[name]; ok {
 					parts = append(parts, fmt.Sprintf("%s %s", name, round(d)))
 				}
@@ -162,6 +162,9 @@ func run(args []string, stdout, stderr io.Writer) error {
 				}
 				break
 			}
+			proofStart := time.Now()
+			prf := snapshotBefore(dir, c)
+			spent["prove"] += time.Since(proofStart)
 			start, snapshot, err1 := newFunction16(dir)
 			if err1 != nil {
 				return err1
@@ -181,6 +184,12 @@ func run(args []string, stdout, stderr io.Writer) error {
 			if shouldReturn {
 				return err1
 			}
+			verdict, proved := "", false
+			if builds && scoreErr == nil {
+				proofStart = time.Now()
+				verdict, proved = prf.verdict()
+				spent["prove"] += time.Since(proofStart)
+			}
 			switch {
 			case scoreErr != nil || !builds:
 				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the package stopped building%s\n", attempted, elapsed, c.Kind, c.Target, why)
@@ -189,6 +198,10 @@ func run(args []string, stdout, stderr io.Writer) error {
 				}
 			case testErr != nil:
 				fmt.Fprintf(stdout, "  %-2d %7s  reverted %s %s  the tests failed: %v\n", attempted, elapsed, c.Kind, c.Target, testErr)
+				if proved {
+					// a proof the tests contradict: a bug in the prover, or a flaky test
+					fmt.Fprintf(stdout, "      SOUNDNESS ALARM: the change was %s, yet its tests failed\n", verdict)
+				}
 				if err := revert(); err != nil {
 					return err
 				}
@@ -205,7 +218,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 					return err
 				}
 			default:
-				err2 := newFunction11(hist, c, before, after, stdout, attempted, elapsed)
+				err2 := newFunction11(hist, c, before, after, stdout, attempted, elapsed, verdict)
 				if err2 != nil {
 					return err2
 				}
@@ -275,13 +288,20 @@ func newFunction14() (func() error, chan os.Signal) {
 	return pending, interrupt
 }
 
-func newFunction11(hist *refactor.History, c refactor.Candidate, before cost.Tree, after cost.Tree, stdout io.Writer, attempted int, elapsed string) error {
+func newFunction11(hist *refactor.History, c refactor.Candidate, before cost.Tree, after cost.Tree, stdout io.Writer, attempted int, elapsed string, proof string) error {
 	verdict := "tests pass"
 	if hist != nil {
 		verdict = "committed"
-		if err := hist.Commit(c, before, after); err != nil {
+		var notes []string
+		if proof != "" {
+			notes = append(notes, "sx-proof: "+proof)
+		}
+		if err := hist.Commit(c, before, after, notes...); err != nil {
 			return err
 		}
+	}
+	if proof != "" {
+		verdict += ", " + shortVerdict(proof)
 	}
 	fmt.Fprintf(stdout, "  %-2d %7s  %-7s %-22s %d -> %d nodes (%+d, predicted %+d), J %.1f -> %.1f (%+.1f, predicted %+.1f), %s\n",
 		attempted, elapsed, c.Kind, c.Target, before.Nodes, after.Nodes, after.Nodes-before.Nodes, -c.Predicted,
@@ -441,6 +461,7 @@ func newFunction22(fs *flag.FlagSet) {
 	fs.Float64Var(&cost.Block, "block", cost.Block, "B, the weight (statements × depth) a function should have on average")
 	fs.Float64Var(&cost.H, "overhead", cost.H, "H, what extracting a function typically costs in nodes")
 	fs.Float64Var(&cost.M, "m", cost.M, "the multiplier: aim at functions weighing m·B; any positive number")
+	fs.BoolVar(&proveChanges, "prove", proveChanges, "record whether each change is proved to keep the package's behaviour (the tests still decide)")
 }
 
 func newFunction3(known refactor.Failures, baseline refactor.Failures, testTime time.Duration, testRuns int, start time.Time, stdout io.Writer) (time.Duration, int) {
