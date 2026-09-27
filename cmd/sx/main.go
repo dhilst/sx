@@ -207,7 +207,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 		}
 		defer func() {
 			var parts []string
-			for _, name := range []string{"load", "dead", "inline", "dedup", "extract", "eg", "apply+gate"} {
+			for _, name := range []string{"load", "dead", "inline", "dedup", "extract", "heuristic", "eg", "apply+gate"} {
 				if d, ok := spent[name]; ok {
 					parts = append(parts, fmt.Sprintf("%s %s", name, round(d)))
 				}
@@ -232,6 +232,7 @@ func run(args []string, stdout, stderr io.Writer) error {
 					timed("inline", func() { add(cache.Inline(dir)) })
 					timed("dedup", func() { add(cache.Duplicates(dir)) })
 					timed("extract", func() { add(cache.Extractions(dir)) })
+					timed("heuristic", func() { add(cache.Heuristics(dir)) })
 				}
 				if hasEg && len(egTemplates) > 0 {
 					timed("eg", func() { add(cache.Eg(dir, egTemplates)) })

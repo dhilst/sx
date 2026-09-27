@@ -184,7 +184,7 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 			}
 			return undoInline()
 		}, nil
-	case KindDuplicate, KindExtract:
+	case KindDuplicate, KindExtract, KindHeuristic:
 		if goplsPath == "" {
 			return nil, fmt.Errorf("gopls is not installed")
 		}
@@ -262,7 +262,7 @@ func Apply(dir string, c Candidate, goplsPath, egPath string) (revert func() err
 			restore()
 			return nil, fmt.Errorf("gopls extracted nothing at %s", spec)
 		}
-		if c.Kind == KindExtract {
+		if c.Kind != KindDuplicate {
 			return restore, nil // one copy: gopls's extraction is the whole change
 		}
 		call, err := callSite(originals[first.File], first, first.File, name)

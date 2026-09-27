@@ -155,6 +155,18 @@ func (tp *typedPackage) check(exports map[string]string, path string) (err error
 // copies sit in: a declaration gopls writes at the call site has to compile
 // in each of them.
 func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int, copies []*ast.File) (Extraction, error) {
+	return predictExtractionTail(tp, file, stmts, d, copies, false)
+}
+
+// predictExtractionTail is predictExtraction that, when tail is set, lets a
+// run that ends by returning from the enclosing function take its defers
+// along. The call is then "return f(...)": nothing of the caller runs between
+// the helper returning and the caller returning, so each deferred call still
+// runs as the caller returns, in the same order, on the normal path and on a
+// panic. Two things still tie a defer to the caller's frame: recover, which
+// only stops a panic in the frame it was deferred in, and named results,
+// which a deferred call can change after the return has set them.
+func predictExtractionTail(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int, copies []*ast.File, tail bool) (Extraction, error) {
 	info := tp.info
 	start, end := stmts[0].Pos(), stmts[len(stmts)-1].End()
 	e := Extraction{D: d}
@@ -275,7 +287,7 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 		return false
 	})
 	hasReturn := len(returns) > 0
-	if what := frameBound(info, stmts); what != "" {
+	if what := frameBound(info, stmts); what != "" && !(tail && what == "a defer" && tailReturns(info, parent, outer, block, stmts)) {
 		// A defer runs when the function it is in returns, and recover
 		// only works in a deferred call of the panicking frame. Moved into
 		// the helper, "configMu.Lock(); defer configMu.Unlock()" released
@@ -335,7 +347,7 @@ func predictExtraction(tp *typedPackage, file *ast.File, stmts []ast.Stmt, d int
 		used, firstUse := usedIn(tp, end, v.obj.Parent().End(), v.obj)
 		result := v.assigned && used && !overridden(info, firstUse, v.obj, v.free, outer)
 		param := v.free && !v.defined
-		if (result || param) && aliased(info, stmts, v.obj) {
+		if (result || param) && aliased(info, stmts, v.obj, written(info, outer, v.obj)) {
 			// gopls passes and returns by value. Whatever holds the address
 			// would keep the helper's copy: "var buf bytes.Buffer;
 			// cmd.Stderr = &buf" was extracted exactly so, and the build,
@@ -890,7 +902,14 @@ func isPointer(t types.Type) bool {
 // aliased reports whether the run lets anything keep a reference to obj: its
 // address taken with &, implicitly by a pointer-receiver method, or by a
 // closure that captures it.
-func aliased(info *types.Info, stmts []ast.Stmt, obj types.Object) bool {
+//
+// A closure that mentions obj holds the variable, not its value, but that is
+// only a difference when something writes obj: a copy nobody changes reads
+// the same as the original. So a closure counts only when obj is written
+// somewhere in its function. run() passes its stderr parameter to the
+// closure that reports an interrupt, and that alone kept its whole
+// subcommand where it was.
+func aliased(info *types.Info, stmts []ast.Stmt, obj types.Object, written bool) bool {
 	found := false
 	is := func(x ast.Expr) bool {
 		id, ok := ast.Unparen(x).(*ast.Ident)
@@ -915,6 +934,9 @@ func aliased(info *types.Info, stmts []ast.Stmt, obj types.Object) bool {
 					}
 				}
 			case *ast.FuncLit:
+				if !written {
+					return true
+				}
 				ast.Inspect(n.Body, func(m ast.Node) bool {
 					if id, ok := m.(*ast.Ident); ok && info.Uses[id] == obj {
 						found = true
@@ -926,6 +948,34 @@ func aliased(info *types.Info, stmts []ast.Stmt, obj types.Object) bool {
 			return !found
 		})
 	}
+	return found
+}
+
+// written reports whether anything in fn assigns obj, increments it or takes
+// its address, after it is declared.
+func written(info *types.Info, fn *ast.FuncDecl, obj types.Object) bool {
+	is := func(x ast.Expr) bool {
+		id, ok := ast.Unparen(x).(*ast.Ident)
+		return ok && info.Uses[id] == obj
+	}
+	found := false
+	ast.Inspect(fn, func(n ast.Node) bool {
+		switch n := n.(type) {
+		case *ast.AssignStmt:
+			for _, lhs := range n.Lhs {
+				if is(lhs) {
+					found = true
+				}
+			}
+		case *ast.IncDecStmt:
+			found = found || is(n.X)
+		case *ast.UnaryExpr:
+			found = found || n.Op == token.AND && is(n.X)
+		case *ast.RangeStmt:
+			found = found || n.Key != nil && is(n.Key) || n.Value != nil && is(n.Value)
+		}
+		return !found
+	})
 	return found
 }
 
@@ -1231,6 +1281,43 @@ func frameBound(info *types.Info, stmts []ast.Stmt) string {
 		})
 	}
 	return what
+}
+
+// tailReturns reports whether stmts, a run in block, end by returning from
+// the function around them, and that function's defers may move with them:
+// its results are unnamed and nothing in the run calls recover.
+func tailReturns(info *types.Info, parent map[ast.Node]ast.Node, outer *ast.FuncDecl, block ast.Node, stmts []ast.Stmt) bool {
+	if _, ok := stmts[len(stmts)-1].(*ast.ReturnStmt); !ok {
+		return false
+	}
+	sig := outer.Type
+	for n := parent[block]; n != nil && n != outer; n = parent[n] {
+		if lit, ok := n.(*ast.FuncLit); ok {
+			sig = lit.Type
+			break
+		}
+	}
+	if sig.Results != nil {
+		for _, f := range sig.Results.List {
+			if len(f.Names) > 0 {
+				return false
+			}
+		}
+	}
+	recovers := false
+	for _, s := range stmts {
+		ast.Inspect(s, func(n ast.Node) bool {
+			if call, ok := n.(*ast.CallExpr); ok {
+				if id, ok := ast.Unparen(call.Fun).(*ast.Ident); ok {
+					if b, ok := info.Uses[id].(*types.Builtin); ok && b.Name() == "recover" {
+						recovers = true
+					}
+				}
+			}
+			return !recovers
+		})
+	}
+	return !recovers
 }
 
 // enclosingSignature is the type of the innermost function, declared or

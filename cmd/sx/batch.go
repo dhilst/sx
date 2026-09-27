@@ -86,7 +86,7 @@ func finishBatch(stdout io.Writer, dir string, hist *refactor.History, attempts,
 		Attempts: attempts, Kept: len(kept), Dropped: dropped, ByKind: map[refactor.Kind]int{},
 		Apply: spent["apply+gate"], Test: testTime, TestRuns: testRuns,
 	}
-	for _, d := range []string{"load", "dead", "inline", "dedup", "extract", "eg"} {
+	for _, d := range []string{"load", "dead", "inline", "dedup", "extract", "heuristic", "eg"} {
 		m.Detect += spent[d]
 	}
 	for _, c := range kept {
@@ -106,7 +106,7 @@ func finishBatch(stdout io.Writer, dir string, hist *refactor.History, attempts,
 	m.LOCAdded, m.LOCRemoved = hist.LOC()
 	summary := fmt.Sprintf("sx: %d changes, %d -> %d nodes (%+d), J %.1f -> %.1f, %+d lines\n\n", len(kept), m.NodesBefore, m.NodesAfter,
 		m.NodesAfter-m.NodesBefore, m.ObjectiveBefore, m.ObjectiveAfter, m.LOCAdded-m.LOCRemoved)
-	for _, k := range []refactor.Kind{refactor.KindDuplicate, refactor.KindExtract, refactor.KindDead, refactor.KindInline, refactor.KindEg} {
+	for _, k := range []refactor.Kind{refactor.KindDuplicate, refactor.KindExtract, refactor.KindHeuristic, refactor.KindDead, refactor.KindInline, refactor.KindEg} {
 		if n := m.ByKind[k]; n > 0 {
 			summary += fmt.Sprintf("  %-7s %d\n", k, n)
 		}

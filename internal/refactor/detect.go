@@ -42,6 +42,9 @@ const (
 	KindEg Kind = "eg"
 	// KindExtract moves part of a heavy function into a function of its own.
 	KindExtract Kind = "extract"
+	// KindHeuristic is an extraction proposed by a rule (see heuristic.go)
+	// rather than found by searching every cut.
+	KindHeuristic Kind = "heuristic"
 )
 
 // Candidate is one change worth attempting, with what the measure says it
@@ -78,7 +81,7 @@ type Candidate struct {
 // candidate come back with a new name. One was retried seven times that way.
 func (c Candidate) Key() string {
 	switch c.Kind {
-	case KindDuplicate, KindExtract:
+	case KindDuplicate, KindExtract, KindHeuristic:
 		// Content, because the copies move whenever anything above them does.
 		return string(c.Kind) + ":" + c.Hash
 	case KindInline:

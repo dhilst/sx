@@ -144,6 +144,10 @@ func kinds(t *testing.T) map[string]func(dir string) ([]Candidate, error) {
 			need("gopls")
 			return duplicates(dir)
 		},
+		"heuristic_": func(dir string) ([]Candidate, error) {
+			need("gopls")
+			return NewCache().Heuristics(dir)
+		},
 		"extract_": func(dir string) ([]Candidate, error) {
 			need("gopls")
 			return NewCache().Extractions(dir)
