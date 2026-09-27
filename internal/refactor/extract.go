@@ -111,13 +111,15 @@ func bestCut(tp *typedPackage, path string, f *ast.File, fn *ast.FuncDecl) (Cand
 	sort.SliceStable(cuts, func(i, j int) bool { return cuts[i].bound > cuts[j].bound })
 	best, found := Candidate{}, false
 	priced := 0
-	for i, k := range cuts {
-		if priced == extractShortlist || i == 16*extractShortlist {
+	for _, k := range cuts {
+		if priced == extractShortlist {
 			break
 		}
-		// A cut the model refuses does not count: the ones the weights like
-		// best are the longest runs, and those are the likeliest to hold
-		// something - a defer, an escaping address - that rules them out.
+		// A cut the model refuses does not count, however many there are:
+		// the ones the weights like best are the longest runs, and those are
+		// the likeliest to hold something that rules them out. In sx's own
+		// run() the first 256 all held a defer or a goto, and capping the
+		// search there left the heaviest function in the tree uncut.
 		model, err := predictExtraction(tp, f, k.stmts, 1, []*ast.File{f})
 		if err != nil {
 			continue
